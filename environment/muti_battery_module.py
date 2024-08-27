@@ -1,9 +1,13 @@
-from single_battery_module import SingleBattery
+from environment.single_battery_module import SingleBattery
 
 class MutiBattery:
     def __init__(self, num_batteries, **kwargs):
         self.num_batteries = num_batteries
         self.batteries = [SingleBattery(**kwargs) for _ in range(num_batteries)]
+
+    def reset(self):
+        for battery in self.batteries:
+            battery.reset()
 
     def run(self, t_seconds):
         num_steps = int(t_seconds / self.batteries[0].dt)

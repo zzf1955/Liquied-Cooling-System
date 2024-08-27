@@ -11,6 +11,7 @@ class SingleBattery:
         self.resistance = resistance  # 内阻 (Ω)
         self.flow_rate = flow_rate      # 冷却液流速 (m/s)
         self.inlet_temp = inlet_temp    # 冷却液进入温度 (K)
+        self.env_temperature = env_temperature
 
         # 初始化温度网格
         self.temperature = np.full((self.grid_size + 2, self.grid_size + 2, self.grid_size + 2), env_temperature)
@@ -24,6 +25,10 @@ class SingleBattery:
         self.top_layer_indices = (slice(1, self.grid_size+1), slice(1, self.grid_size+1), -2)
         self.current = 0
         self.voltage = 5
+
+    def reset(self):
+        # 将温度网格重置为环境温度
+        self.temperature.fill(self.env_temperature)
 
     def update_heat_generation(self):
         center_index = self.grid_size // 2 + 1
@@ -101,4 +106,3 @@ class SingleBattery:
         # 计算平均温度
         average_temperature = np.mean(top_surface_temperatures)
         return average_temperature
-

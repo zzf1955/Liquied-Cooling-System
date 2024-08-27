@@ -1,10 +1,15 @@
 import numpy as np
 from gymnasium import spaces
-from muti_battery_module import MutiBattery as MB
+from environment.muti_battery_module import MutiBattery as MB
 import gymnasium as gym
 
 class MutiBatteryEnv(gym.Env):
-    def __init__(self, num_batteries=3, episode_steps=400, max_current=10, min_current=0, env_temp=298, change_steps=128, current_change_prob=0.01, **kwargs):
+    def __init__(self, num_batteries=3, episode_steps=400, 
+                 max_battery_tmp = 330,min_battery_tmp = 270,
+                 max_current=10, min_current=0, env_temp=298, 
+                 change_steps=128, current_change_prob=0.01,
+                 tmp_threshould = 5,
+                 random_current = False, **kwargs):
         super(MutiBatteryEnv, self).__init__()
         self.battery_system = MB(num_batteries=num_batteries, **kwargs)  # 初始化多电池系统
 
@@ -21,6 +26,9 @@ class MutiBatteryEnv(gym.Env):
         # 参数范围
         self.temp_range = (270, 330)  # 温度范围
         self.flow_rate_range = (0, 5)  # 流速范围
+        self.max_battery_tmp = max_battery_tmp
+        self.min_battery_tmp = min_battery_tmp
+        self.threshould_tmp = tmp_threshould
 
         # 环境温度（室温）
         self.environment_temp = env_temp  # 开尔文
@@ -33,9 +41,27 @@ class MutiBatteryEnv(gym.Env):
         self.max_current = max_current
         self.min_current = min_current
         self.current_change_prob = current_change_prob  # 电流改变的概率
+        self.random_current = random_current
+        self.reset()
+        if not random_current:
+            self.fixed_current_list = []
+            for _ in range(episode_steps):
+                if not self.fixed_current_list:
+                    # 初始时电流值为 0
+                    current_values = [0] * len(self.battery_system.batteries)
+                else:
+                    # 基于上一步的电流值，可能随机改变
+                    current_values = self.fixed_current_list[-1][:]
+                    for j in range(len(self.battery_system.batteries)):
+                        if np.random.rand() < current_change_prob:
+                            current_values[j] = np.random.random()*max_current
+                
+                self.fixed_current_list.append(current_values)
+
 
     def step(self, actions):
         # 将标准化的动作映射到实际的温度和流速范围
+
         for i, action in enumerate(actions):
             inlet_temp = self._map_to_range(action[0], self.temp_range)
             flow_rate = self._map_to_range(action[1], self.flow_rate_range)
@@ -45,10 +71,13 @@ class MutiBatteryEnv(gym.Env):
         self.battery_system.run(t_seconds=1)
 
         # 每次step以一定概率随机改变每个电池的输出电流
-        for battery in self.battery_system.batteries:
-            if np.random.rand() < self.current_change_prob:
-                battery.current = np.random.uniform(self.min_current, self.max_current)
-
+        if self.random_current:
+            for battery in self.battery_system.batteries:
+                if np.random.rand() < self.current_change_prob:
+                    battery.current = np.random.uniform(self.min_current, self.max_current)
+        else:
+            for i,battery in enumerate(self.battery_system.batteries):
+                battery.current = self.fixed_current_list[self.current_step][i]
         # 获取当前状态并展平为1D向量
         states = []
         for battery in self.battery_system.batteries:
@@ -63,24 +92,27 @@ class MutiBatteryEnv(gym.Env):
         rewards = []
         for i in range(self.num_batteries):
             delta_temp = abs(state[i * 3] - self.environment_temp)  # 核心温度
-            rewards.append(np.exp(-delta_temp / 4 + 2.3) - 5)
+            rewards.append(np.exp(-delta_temp / 4 + 2.3) - 10+self.threshould_tmp)
         reward = np.mean(rewards)  # 取所有电池的平均奖励
 
         # 更新计步器
         self.current_step += 1
 
         # 判断终止条件：任意电池的核心温度超过370或低于270
-        terminated = any(state[i * 3] > 310 or state[i * 3] < 290 for i in range(self.num_batteries))
+        terminated = any(state[i * 3] > self.max_battery_tmp or state[i * 3] < self.min_battery_tmp for i in range(self.num_batteries))
 
         # 判断截断条件：步数超过max_steps
         truncated = bool(self.current_step >= self.max_steps)
 
         # 添加调试信息
-        info = {}
+        info = {'reward':reward,'actions':self.battery_system.batteries[0].get_action(),'obs':state}
         
         return state, reward, terminated, truncated, info
 
-    def reset(self, seed=233, randomize_current=True):
+    def reset(self, seed=233, randomize_init_current=False):
+
+        #seed = 233
+
         # 重置环境状态
         super().reset(seed=seed)
         np.random.seed(seed)
@@ -89,12 +121,14 @@ class MutiBatteryEnv(gym.Env):
             battery.inlet_temp = self.environment_temp
             battery.flow_rate = 0.1  # 初始化流速为默认值
 
-            if randomize_current:
+            if randomize_init_current:
                 battery.current = np.random.uniform(self.min_current, self.max_current)
             else:
                 battery.current = 0
 
         self.current_step = 0
+
+        self.battery_system.reset()
 
         # 返回初始状态并展平为1D向量
         initial_states = []
@@ -105,7 +139,6 @@ class MutiBatteryEnv(gym.Env):
         
         # 添加调试信息
         info = {}
-        
         return initial_state, info
 
     def render(self):
@@ -129,7 +162,7 @@ class MutiBatteryEnv(gym.Env):
 
 def test_muti_battery_env():
     env = MutiBatteryEnv(num_batteries=1, episode_steps=512, max_current=10, min_current=0, env_temp=298, change_steps=128)
-    initial_state, _ = env.reset(randomize_current=True)
+    initial_state, _ = env.reset(randomize_init_current=False)
     
     print("Initial State:")
     env.render()  # 显示初始状态
@@ -178,35 +211,12 @@ def test_muti_battery_env():
 
                 except ValueError:
                     print("Invalid input, using previous values.")
-        
+        if user_input == "stop":
+            break
         elif user_input == '':
             continue
 
     print("Test completed.")
 
 if __name__ == "__main__":
-    # 假设你的环境名为MyEnv
-    env = MutiBatteryEnv(episode_steps=400,num_batteries=1)
-
-    #test_muti_battery_env()
-    #env = gym.make("BipedalWalker-v3")
-    from stable_baselines3.common.env_checker import check_env
-    from stable_baselines3 import SAC
-    import PrioritizedReplayBuffer
-
-    # 检查环境是否兼容
-    #check_env(env)
-
-    policy_kwargs = dict(
-        net_arch=dict(
-            pi=[128,128],  # 策略网络
-            qf=[256,256]   # 价值网络
-        )
-    )
-
-    buffer_size = 1000000  # 根据需要调整
-    replay_buffer = PrioritizedReplayBuffer(buffer_size=buffer_size, observation_space=env.observation_space, action_space=env.action_space)
-
-    model = SAC('MlpPolicy', env, replay_buffer=replay_buffer, verbose=1, policy_kwargs=policy_kwargs)
-
-    model.learn(total_timesteps=1000000000000)
+    test_muti_battery_env()
