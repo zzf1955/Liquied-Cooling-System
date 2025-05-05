@@ -8,8 +8,9 @@
   - 仿真步长改为5s
   - state内容没动
 
+```cpp
 battery
-├─ BatteryEnv **环境**
+├─ BatteryEnv **环境** \\
 │    ├─ __init__.py
 │    ├─ muti_battery_env.py
 │    ├─ muti_battery_env_con.py
@@ -45,3 +46,4 @@ battery
               ├─ log_20.csv
               ├─ log_30.csv
               └─ log_40.csv
+```
