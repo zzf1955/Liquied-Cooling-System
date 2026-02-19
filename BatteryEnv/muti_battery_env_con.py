@@ -46,6 +46,7 @@ class MutiBatteryEnv(gym.Env):
         self.flow_rate_range = flow_rate_range  # 流速范围 (m/s)
         self.max_battery_tmp = max_battery_tmp
         self.min_battery_tmp = min_battery_tmp
+        self.current_clip_range = current_clip_range  # 电流截断范围
 
         # 动作空间定义：每个电池组的冷却液入口温度和流速，范围为[-1, 1]
         # 每个组只需要一个动作（组内所有电池使用相同的冷却策略）
@@ -256,7 +257,10 @@ class MutiBatteryEnv(gym.Env):
         self.current_log = []
 
         super().reset(seed=seed)
-        np.random.seed(seed)   
+        np.random.seed(seed)
+
+        self.current_step = 0
+        self.battery_system.reset()
 
         # 重置所有电池的状态
         for battery in self.battery_system.batteries:
@@ -266,14 +270,9 @@ class MutiBatteryEnv(gym.Env):
             if randomize_init_current:
                 current = np.random.normal(self.current_mu, self.current_sigma)
                 current = np.clip(current, *self.current_clip_range)
-                for battery in self.battery_system.batteries:
-                    battery.current = current
+                battery.current = current
             else:
-                for battery in self.battery_system.batteries:
-                    battery.current = 0
-
-        self.current_step = 0
-        self.battery_system.reset()
+                battery.current = 0
 
         # 获取初始状态
         initial_state = self._get_state()

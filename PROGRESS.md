@@ -7,6 +7,10 @@
 2. 训练速度慢，未利用并行化
 3. 缺乏可视化手段
 
+---
+
+## 提交1: `e54f39c` - feat: 优化电池降阶模型环境
+
 ### 解决方案
 
 #### 1. 延迟优化
@@ -64,7 +68,16 @@
 - **解决**: 修改所有Heatmap中的`cmin`为`zmin`，`cmax`为`zmax`
 - **避免**: 查阅Plotly Heatmap的正确属性名
 
-### git commit ID
-分支: `optimization/environment-refactor`
-提交: `b0a7ab1`
+---
 
+## 提交2: `dc0fa83` - fix: 修复MutiBatteryEnv中的两个bug
+
+### 问题5: AttributeError: 'MutiBatteryEnv' object has no attribute 'current_clip_range'
+- **原因**: `__init__`参数`current_clip_range`未保存为实例变量
+- **解决**: 添加`self.current_clip_range = current_clip_range`
+- **避免**: 统一将所有配置参数保存为实例变量
+
+### 问题6: randomize_init_current=True时电流仍为0
+- **原因**: 设置电流后调用`battery_system.reset()`会重置电流为0
+- **解决**: 调整代码顺序，先调用`battery_system.reset()`，再设置电流
+- **避免**: 注意reset流程中各操作的顺序依赖关系
