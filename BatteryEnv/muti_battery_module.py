@@ -1,5 +1,5 @@
+# from BatteryEnv.single_battery_module import SingleBattery
 from BatteryEnv.single_battery_module import SingleBattery
-# from single_battery_module import SingleBattery
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -198,6 +198,7 @@ def test_muti_battery():
         
         for i in range(muti_battery.total_batteries):
             battery = muti_battery.batteries[i]
+            battery.current = 30.0
             # battery.set_action(inlet_temp_state[step % 30], flow_rate_state[step % 30])
             battery.set_action(inlet_temp_state[int(step / 400)], flow_rate_state[0])
 

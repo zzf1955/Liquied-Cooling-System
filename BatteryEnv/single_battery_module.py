@@ -29,14 +29,15 @@ class SingleBattery:
                 ):
         
         # 调整系数（用来调整电池冷却温度的传递的传递)
-        self.adjusting_factor = 1.88
+        # 增加此系数以加快热传导，使动作效果在约10步内可见
+        self.adjusting_factor = 3.0
         # self.adjusting_factor = 1
 
         # 电池尺寸参数
         self.length = length
         self.width = width
         self.height = height
-        self.cell_length = 0.02            # 单元格长度 (m)
+        self.cell_length = 0.01            # 单元格长度 (m)
         
         # 电网格参数
         self.grid_size_x = int(self.length / self.cell_length)
@@ -117,22 +118,28 @@ class SingleBattery:
         """
         将底部冷却后的温度扩散到整个三维电池。
         扩散是从底面 z=1 向上扩散，z方向为主。
+        优化：增强垂直方向热传导，加快冷却效果传递到核心。
         """
         new_temp = np.copy(self.temperature)
+
+        # 增强垂直方向热传导的系数
+        vertical_boost = 1.5
 
         for k in range(1, self.grid_size_z + 1):
             for i in range(1, self.grid_size_x + 1):
                 for j in range(1, self.grid_size_y + 1):
                     # 计算离底面的距离 (z轴方向)
                     dz = abs(k - 1)
-                    
+
                     if dz == 0:
                         diffusion_factor = 1.0
                     else:
-                        diffusion_factor = 1.0 / (1.0 + dz * 0.1)  # 离底面越远，扩散越慢
+                        # 优化：减小距离衰减系数，加快热量向上传递
+                        diffusion_factor = 1.0 / (1.0 + dz * 0.05)
 
-                    # 更新温度
-                    new_temp[i, j, k] = self.temperature[i, j, k] + self.adjusting_factor * self.alpha * self.dt / self.cell_length**2 * diffusion_factor * (self.temperature[i, j, k-1] - self.temperature[i, j, k])
+                    # 更新温度，增强垂直方向的热传导
+                    z_diffusion = self.temperature[i, j, k-1] - self.temperature[i, j, k]
+                    new_temp[i, j, k] = self.temperature[i, j, k] + self.adjusting_factor * vertical_boost * self.alpha * self.dt / self.cell_length**2 * diffusion_factor * z_diffusion
 
 
         # 边界条件处理
@@ -195,18 +202,28 @@ class SingleBattery:
     def apply_cooling(self):
         # 计算对流换热系数 (与流速相关)
         h = self.calculate_convective_coefficient(self.flow_rate)
-        
-        # 底部冷却处理
+
+        # 增强冷却效果的系数
+        cooling_boost = 1.5
+
+        # 底部冷却处理 - 同时冷却底部多层以加快效果
         bottom_layer_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 1)
-        
-        # 计算热交换
-        heat_exchange = h * self.cell_length**2 * (self.temperature[bottom_layer_indices] - self.inlet_temp) * self.dt
-        
+        # 冷却底部两层
+        bottom_two_layers = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), slice(1, 3))
+
+        # 计算热交换（增强）
+        heat_exchange = h * self.cell_length**2 * (self.temperature[bottom_layer_indices] - self.inlet_temp) * self.dt * cooling_boost
+
         # 底部降温
         self.temperature[bottom_layer_indices] -= heat_exchange / (self.density * self.cell_length**3 * self.specific_heat)
 
-        # 更新冷却液温度（假设每个单元升温0.5%）
-        self.inlet_temp += 0.08 * (
+        # 同时冷却第二层（加速热量传递）
+        heat_exchange_layer2 = h * self.cell_length**2 * (self.temperature[bottom_layer_indices] - self.inlet_temp) * self.dt * cooling_boost * 0.3
+        layer2_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 2)
+        self.temperature[layer2_indices] -= heat_exchange_layer2 / (self.density * self.cell_length**3 * self.specific_heat)
+
+        # 更新冷却液温度（优化：增加温升系数使冷却效果更明显）
+        self.inlet_temp += 0.12 * (
             np.mean(self.temperature[bottom_layer_indices]) - self.inlet_temp
         )
 

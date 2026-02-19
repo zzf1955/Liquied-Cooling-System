@@ -406,27 +406,63 @@ def test_muti_battery_env():
 
     print("Test completed.")
 
-def make_env(num_batteries_per_group=13, 
-            num_groups=4, 
+def make_env(num_batteries_per_group=13,
+            num_groups=4,
             episode_steps=512,
-            log_path = "",
-            con = True):
+            log_path="",
+            con=True,
+            num_train_envs=8,
+            num_test_envs=4,
+            use_subproc=True):
+    """
+    创建向量化环境，支持多进程并行训练
 
-    env = MutiBatteryEnv(num_batteries_per_group=num_batteries_per_group, 
-                         num_groups=num_groups, 
-                         max_steps=episode_steps,
-                         log_path = log_path,
-                         con = con)
-    
-    def _select_env(evaluate = False):
+    参数:
+        num_batteries_per_group: 每组电池数量
+        num_groups: 电池组数量
+        episode_steps: 每个episode的最大步数
+        log_path: 日志保存路径
+        con: 是否使用连续动作空间
+        num_train_envs: 训练环境数量
+        num_test_envs: 测试环境数量
+        use_subproc: 是否使用SubprocVectorEnv（True使用多进程，False使用DummyVectorEnv）
+    """
+
+    def _select_env(evaluate=False, seed=None):
+        """创建独立的环境实例"""
+        env = MutiBatteryEnv(num_batteries_per_group=num_batteries_per_group,
+                            num_groups=num_groups,
+                            max_steps=episode_steps,
+                            log_path=log_path,
+                            con=con)
+        if seed is not None:
+            env.reset(seed=seed)
         return env
 
-    env = _select_env()
+    # 根据是否使用子进程选择向量化环境类型
+    if use_subproc and num_train_envs > 1:
+        # 使用SubprocVectorEnv进行多进程并行
+        train_envs = SubprocVectorEnv(
+            [lambda: _select_env(seed=i) for i in range(num_train_envs)],
+            wait_num=num_train_envs // 2,
+            timeout=0.1
+        )
+        test_envs = SubprocVectorEnv(
+            [lambda: _select_env(seed=num_train_envs + i) for i in range(num_test_envs)],
+            wait_num=num_test_envs // 2,
+            timeout=0.1
+        )
+    else:
+        # 使用DummyVectorEnv作为后备
+        train_envs = DummyVectorEnv(
+            [lambda: _select_env(seed=i) for i in range(max(1, num_train_envs))]
+        )
+        test_envs = DummyVectorEnv(
+            [lambda: _select_env(seed=num_train_envs + i) for i in range(max(1, num_test_envs))]
+        )
 
-    train_envs = DummyVectorEnv(
-        [lambda: _select_env() for _ in range(1)])
-    test_envs = DummyVectorEnv(
-        [lambda: _select_env(True) for _ in range(1)])
-    
-    return env,train_envs,test_envs
+    # 创建一个主环境实例用于获取配置信息
+    main_env = _select_env()
+
+    return main_env, train_envs, test_envs
 
