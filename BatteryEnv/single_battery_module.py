@@ -111,19 +111,18 @@ class SingleBattery:
             self.update_heat_generation()
             self.temperature = self.update_temperature_distribution()
             self.apply_cooling()
-            self.temperature = self.diffuse_cooling()
+            # 只有当有冷却液流动时才启用垂直方向的热扩散
+            if self.flow_rate > 0:
+                self.temperature = self.diffuse_cooling()
             self.thermal_history.append(self.get_core_temperature())
 
     def diffuse_cooling(self):
         """
         将底部冷却后的温度扩散到整个三维电池。
         扩散是从底面 z=1 向上扩散，z方向为主。
-        优化：增强垂直方向热传导，加快冷却效果传递到核心。
+        使用绝热边界条件 - 热量不流出电池。
         """
         new_temp = np.copy(self.temperature)
-
-        # 增强垂直方向热传导的系数
-        vertical_boost = 1.5
 
         for k in range(1, self.grid_size_z + 1):
             for i in range(1, self.grid_size_x + 1):
@@ -134,68 +133,42 @@ class SingleBattery:
                     if dz == 0:
                         diffusion_factor = 1.0
                     else:
-                        # 优化：减小距离衰减系数，加快热量向上传递
                         diffusion_factor = 1.0 / (1.0 + dz * 0.05)
 
-                    # 更新温度，增强垂直方向的热传导
-                    z_diffusion = self.temperature[i, j, k-1] - self.temperature[i, j, k]
-                    new_temp[i, j, k] = self.temperature[i, j, k] + self.adjusting_factor * vertical_boost * self.alpha * self.dt / self.cell_length**2 * diffusion_factor * z_diffusion
+                    # 绝热边界条件
+                    if k == 1:
+                        # 底部第一层：热量不流出
+                        z_diffusion = 0
+                    else:
+                        z_diffusion = self.temperature[i, j, k-1] - self.temperature[i, j, k]
 
-
-        # 边界条件处理
-        new_temp[0, :, :] = new_temp[1, :, :]
-        new_temp[self.grid_size_x + 1, :, :] = new_temp[self.grid_size_x, :, :]
-        new_temp[:, 0, :] = new_temp[:, 1, :]
-        new_temp[:, self.grid_size_y + 1, :] = new_temp[:, self.grid_size_y, :]
-        new_temp[:, :, 0] = new_temp[:, :, 1]
-        new_temp[:, :, self.grid_size_z + 1] = new_temp[:, :, self.grid_size_z]
+                    # 更新温度
+                    new_temp[i, j, k] = self.temperature[i, j, k] + self.adjusting_factor * self.alpha * self.dt / self.cell_length**2 * diffusion_factor * z_diffusion
 
         return new_temp
 
     def update_temperature_distribution(self):
+        """
+        更新电池内部温度分布（热扩散）
+        简化版本，标准热扩散方程，绝热边界
+        """
         new_temp = np.copy(self.temperature)
-        
-        # 获取中心位置
-        center_x = self.grid_size_x // 2 + 1
-        center_y = self.grid_size_y // 2 + 1
-        center_z = self.grid_size_z // 2 + 1
-        
-        # 更新内部温度分布
+
+        # 简单的热扩散（不使用距离衰减）
         for i in range(1, self.grid_size_x + 1):
             for j in range(1, self.grid_size_y + 1):
                 for k in range(1, self.grid_size_z + 1):
-                    # 计算到中心的距离
-                    dx = abs(i - center_x)
-                    dy = abs(j - center_y)
-                    dz = abs(k - center_z)
-                    distance = np.sqrt(dx**2 + dy**2 + dz**2)
-                    
-                    # 根据距离调整扩散系数
-                    if distance == 0:  # 中心点
-                        diffusion_factor = 1.0
-                    else:
-                        # 距离越远，扩散越慢
-                        diffusion_factor = 1.0 / (1.0 + distance * 0.1)
-                    
-                    # 更新温度
-                    new_temp[i, j, k] = self.temperature[i, j, k] + self.alpha * self.dt / self.cell_length**2 * diffusion_factor * (
-                        self.temperature[i+1, j, k] + self.temperature[i-1, j, k] +
-                        self.temperature[i, j+1, k] + self.temperature[i, j-1, k] +
-                        self.temperature[i, j, k+1] + self.temperature[i, j, k-1] -
-                        6 * self.temperature[i, j, k])
-        
-        # 设置边界单元温度
-        # 沿 x 轴的边界
-        new_temp[0, :, :] = new_temp[1, :, :]
-        new_temp[self.grid_size_x + 1, :, :] = new_temp[self.grid_size_x, :, :]
-        
-        # 沿 y 轴的边界
-        new_temp[:, 0, :] = new_temp[:, 1, :]
-        new_temp[:, self.grid_size_y + 1, :] = new_temp[:, self.grid_size_y, :]
-        
-        # 沿 z 轴的边界
-        new_temp[:, :, 0] = new_temp[:, :, 1]
-        new_temp[:, :, self.grid_size_z + 1] = new_temp[:, :, self.grid_size_z]
+                    # 绝热边界条件
+                    T_ip1 = self.temperature[i+1, j, k] if i < self.grid_size_x else self.temperature[i, j, k]
+                    T_im1 = self.temperature[i-1, j, k] if i > 1 else self.temperature[i, j, k]
+                    T_jp1 = self.temperature[i, j+1, k] if j < self.grid_size_y else self.temperature[i, j, k]
+                    T_jm1 = self.temperature[i, j-1, k] if j > 1 else self.temperature[i, j, k]
+                    T_kp1 = self.temperature[i, j, k+1] if k < self.grid_size_z else self.temperature[i, j, k]
+                    T_km1 = self.temperature[i, j, k-1] if k > 1 else self.temperature[i, j, k]
+
+                    # 标准热扩散方程
+                    new_temp[i, j, k] = self.temperature[i, j, k] + self.alpha * self.dt / self.cell_length**2 * (
+                        T_ip1 + T_im1 + T_jp1 + T_jm1 + T_kp1 + T_km1 - 6 * self.temperature[i, j, k])
 
         return new_temp
    
