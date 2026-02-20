@@ -121,20 +121,16 @@ class SingleBattery:
         将底部冷却后的温度扩散到整个三维电池。
         扩散是从底面 z=1 向上扩散，z方向为主。
         使用绝热边界条件 - 热量不流出电池。
+        修改：减少距离衰减，使底部冷却效果能保留
         """
         new_temp = np.copy(self.temperature)
+
+        # 扩散因子（固定值，不再随距离衰减）
+        diffusion_factor = 0.02
 
         for k in range(1, self.grid_size_z + 1):
             for i in range(1, self.grid_size_x + 1):
                 for j in range(1, self.grid_size_y + 1):
-                    # 计算离底面的距离 (z轴方向)
-                    dz = abs(k - 1)
-
-                    if dz == 0:
-                        diffusion_factor = 1.0
-                    else:
-                        diffusion_factor = 1.0 / (1.0 + dz * 0.05)
-
                     # 绝热边界条件
                     if k == 1:
                         # 底部第一层：热量不流出
@@ -143,7 +139,7 @@ class SingleBattery:
                         z_diffusion = self.temperature[i, j, k-1] - self.temperature[i, j, k]
 
                     # 更新温度
-                    new_temp[i, j, k] = self.temperature[i, j, k] + self.adjusting_factor * self.alpha * self.dt / self.cell_length**2 * diffusion_factor * z_diffusion
+                    new_temp[i, j, k] = self.temperature[i, j, k] + self.adjusting_factor * diffusion_factor * self.alpha * self.dt / self.cell_length**2 * z_diffusion
 
         return new_temp
 
@@ -176,13 +172,15 @@ class SingleBattery:
         # 计算对流换热系数 (与流速相关)
         h = self.calculate_convective_coefficient(self.flow_rate)
 
-        # 增强冷却效果的系数
-        cooling_boost = 1.5
+        # 调试日志
+        if hasattr(self, '_debug') and self._debug:
+            print(f"[apply_cooling] flow_rate={self.flow_rate}, h={h:.2f}, inlet_temp={self.inlet_temp:.2f}")
 
-        # 底部冷却处理 - 同时冷却底部多层以加快效果
+        # 增强冷却效果的系数
+        cooling_boost = 500.0
+
+        # 底部冷却处理
         bottom_layer_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 1)
-        # 冷却底部两层
-        bottom_two_layers = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), slice(1, 3))
 
         # 计算热交换（增强）
         heat_exchange = h * self.cell_length**2 * (self.temperature[bottom_layer_indices] - self.inlet_temp) * self.dt * cooling_boost
@@ -195,8 +193,8 @@ class SingleBattery:
         layer2_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 2)
         self.temperature[layer2_indices] -= heat_exchange_layer2 / (self.density * self.cell_length**3 * self.specific_heat)
 
-        # 更新冷却液温度（优化：增加温升系数使冷却效果更明显）
-        self.inlet_temp += 0.12 * (
+        # 更新冷却液温度（降低系数，使入口温度保持较低）
+        self.inlet_temp += 0.01 * (
             np.mean(self.temperature[bottom_layer_indices]) - self.inlet_temp
         )
 

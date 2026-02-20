@@ -7,22 +7,22 @@ import torch
 
 
 class SingleBatteryEnv(gym.Env):
-    def __init__(self, 
-                 episode_steps=512, 
-                 max_current=30,  min_current=0, 
-                 min_voltage=2.5,  max_voltage=3.65, 
-                 min_inlet_temp = 270, max_inlet_temp = 330,
-                 min_flow_rate = 0, max_flow_rate = 5,
-                 env_temp=298, 
+    def __init__(self,
+                 episode_steps=512,
+                 max_current=30,  min_current=0,
+                 min_voltage=2.5,  max_voltage=3.65,
+                 min_inlet_temp = 288, max_inlet_temp = 295,  # 15-22°C
+                 min_flow_rate = 0, max_flow_rate = 6,
+                 env_temp=298,
                  temp_bound = 5,
                  change_steps=128):
         super(SingleBatteryEnv, self).__init__()
-        
+
         # 初始化新版本的电池模块，使用真实参数
         self.battery = SB()  # 使用默认参数，已经设置为真实电池参数
 
-        # 动作空间定义：冷却液入口温度（270到330开尔文）和流速（0到5 m/s）
-        self.action_space = spaces.Box(low=np.array([min_inlet_temp, min_flow_rate], dtype=np.float32), 
+        # 动作空间定义：冷却液入口温度（288到295开尔文）和流速（0到6 m/s）
+        self.action_space = spaces.Box(low=np.array([min_inlet_temp, min_flow_rate], dtype=np.float32),
                                        high=np.array([max_inlet_temp, max_flow_rate], dtype=np.float32), dtype=np.float32)
 
         # 状态空间定义：核心温度、顶部表面平均温度、底部表面平均温度、电池电流、电池电压
