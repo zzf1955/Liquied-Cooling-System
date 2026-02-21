@@ -2,7 +2,7 @@
 import numpy as np
 # 假设你的 MutiBatteryEnv 类定义在 muti_battery_env.py 文件中
 # 请根据你的实际文件结构进行调整
-from BatteryEnv.muti_battery_env import MutiBatteryEnv
+from BatteryEnv.multi_battery_env import MutiBatteryEnv
 
 
 def evaluate_agent(agent, env_config, num_episodes=10, render=False):

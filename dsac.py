@@ -14,7 +14,7 @@ from tianshou.trainer import offpolicy_trainer
 from diffusion import Diffusion
 from diffusion.model import MLP
 from datetime import datetime
-from BatteryEnv.muti_battery_env import make_env
+from BatteryEnv.multi_battery_env import make_env
 
 module_name = "dsac_policy.pth"
 
