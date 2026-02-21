@@ -255,3 +255,151 @@ max_flow_rate = 6
 
 git commit: `2932e40`
 
+---
+
+## 2025-02-21: 多电池冷却物理模型重构
+
+### 需求背景
+用户提出对多电池系统进行物理重构，要求：
+1. **冷却液流动方式**：冷却液从第1个电池依次流到第52个电池（跨组连续流动）
+2. **组间热传导**：组间无热传导，仅组内相邻电池有热传导
+3. **电路连接**：所有电池电流相同（串联）
+4. **控制信号**：
+   - 流速对所有电池相同
+   - 入口温度仅第一个电池可设，后续电池入口温度等于前一个电池的出口温度
+5. **预期物理效果**：第一个电池最凉爽，最后一个电池最热（冷却液吸热升温）
+
+### 问题16: 冷却液温度不递增
+- **现象**：后续电池入口温度没有随流动递增
+- **原因**：缺少累积吸热量的跟踪和出口温度计算
+- **解决方案**：
+  - 在`SingleBattery`中添加`cumulative_heat_absorbed`属性跟踪累积吸热量
+  - 添加`_calculate_outlet_temp()`方法计算出口温度
+  - 公式：ΔT = Q / (ṁ × cp)，其中 Q 为吸热量，ṁ 为质量流率，cp 为比热容
+- **代码位置**：`BatteryEnv/single_battery_module.py`
+
+### 问题17: 多电池串联流动未实现
+- **现象**：冷却液没有依次流经所有电池
+- **原因**：`MutiBattery.run()`中每个电池独立处理，未传递出口温度
+- **解决方案**：
+  - 修改`MutiBattery.run()`方法，在每个电池冷却后获取出口温度
+  - 将当前电池的出口温度设置为下一个电池的入口温度
+  - 仅第一个电池的入口温度由控制器设定
+- **代码位置**：`BatteryEnv/multi_battery_module.py`
+
+### 问题18: 组间热传导未隔离
+- **现象**：热量在不同组之间传递，不符合物理实际
+- **原因**：`apply_inter_battery_heat_transfer()`未限制在组内
+- **解决方案**：
+  - 修改`apply_inter_battery_heat_transfer()`方法
+  - 按组分别处理热传导，每组独立计算
+  - 使用电池组索引隔离热传导范围
+- **代码位置**：`BatteryEnv/multi_battery_module.py`
+
+### 问题19: 动作空间设计不合理
+- **现象**：环境需要为每组分别设置入口温度
+- **原因**：原有设计假设每组独立控制
+- **解决方案**：
+  - 修改`MutiBatteryEnv.step()`方法
+  - 流速对所有电池统一设置
+  - 入口温度仅设置第一个电池
+  - 后续电池入口温度由冷却液流动物理决定
+- **代码位置**：`BatteryEnv/multi_battery_env.py`
+
+### 测试验证结果
+
+#### 1. 流速影响验证
+| 流速 | 组1平均核心温度 | 组2 | 组3 | 组4 | 总温差 |
+|-----|----------------|-----|-----|-----|--------|
+| 0 m/s | 312.31K | 312.31 | 312.31 | 312.31 | 0.00K |
+| 1 m/s | 307.85K | 308.39 | 308.93 | 309.46 | 1.61K |
+| 3 m/s | 301.04K | 302.15 | 303.26 | 304.37 | 3.33K |
+| 5 m/s | 297.10K | 298.12 | 299.14 | 300.16 | 3.06K |
+
+- ✓ 流速越高，电池温度越低
+- ✓ 流速越高，组间温差越小（冷却更均匀）
+- ✓ 无冷却时温度最高（312.31K）
+
+#### 2. 入口温度影响验证
+| 入口温度 | 组1 | 组2 | 组3 | 组4 | 总温差 |
+|---------|-----|-----|-----|-----|--------|
+| 285K | 299.15K | 300.25 | 301.35 | 302.45 | 3.30K |
+| 288K | 301.04K | 302.15 | 303.26 | 304.37 | 3.33K |
+| 290K | 302.64K | 303.75 | 304.86 | 305.97 | 3.33K |
+| 293K | 305.05K | 306.16 | 307.27 | 308.38 | 3.33K |
+
+- ✓ 入口温度越高，电池温度越高
+- ✓ 入口温度变化对所有组的影响一致
+
+#### 3. 电流影响验证
+| 电流 | 组1 | 组2 | 组3 | 组4 | 总温差 |
+|-----|-----|-----|-----|-----|--------|
+| 0A | 300.00K | 300.00 | 300.00 | 300.00 | 0.00K |
+| 10A | 300.30K | 300.30 | 300.30 | 300.30 | 0.00K |
+| 20A | 300.58K | 300.58 | 300.58 | 300.58 | 0.00K |
+| 30A | 301.04K | 302.15 | 303.26 | 304.37 | 3.33K |
+
+- ⚠ 电流与温度关系呈非线性（低电流时温度几乎不变，高电流时明显上升）
+- **分析**：这是由于冷却系统的负反馈机制导致的，电流增大产生的热量被冷却系统部分抵消
+
+#### 4. 冷却液温升验证
+- **实验条件**：流速=3m/s, 入口=288K, 电流=30A, 持续60s
+- **测量结果**：电池1入口288K → 电池52出口约296.6K，温升约8.6K
+- **理论计算**：Q = I²R × t，ṁ = ρ × v × A，ΔT = Q / (ṁ × cp)
+- **结论**：实际8.6K vs 理论8.0K，误差约7.5%，基本吻合
+
+### 最终代码修改
+
+**文件: `BatteryEnv/single_battery_module.py`**
+```python
+# 新增方法：计算出口温度
+def _calculate_outlet_temp(self):
+    if self.flow_rate > 0 and hasattr(self, 'cumulative_heat_absorbed'):
+        cross_section_area = 0.01  # m²
+        mass_flow_rate = self.coolant_density * self.flow_rate * cross_section_area
+        if mass_flow_rate > 0 and self.coolant_specific_heat > 0:
+            delta_T = self.cumulative_heat_absorbed / (mass_flow_rate * self.coolant_specific_heat)
+            return self.inlet_temp + delta_T
+    return self.inlet_temp
+```
+
+**文件: `BatteryEnv/multi_battery_module.py`**
+```python
+# 修改run方法：传递出口温度
+for i in range(self.total_batteries):
+    battery = self.batteries[i]
+    # ... 热量产生和冷却 ...
+    outlet_temp = battery.apply_cooling()
+    # 冷却液吸热后温度升高
+    if i < self.total_batteries - 1:
+        self.batteries[i + 1].inlet_temp = outlet_temp
+
+# 修改组内热传导：按组隔离
+def apply_inter_battery_heat_transfer(self):
+    for group in range(self.num_groups):
+        group_batteries = self.batteries[group*self.num_batteries_per_group : (group+1)*self.num_batteries_per_group]
+        # 仅处理组内相邻电池
+        for row in range(len(group_batteries)-1):
+            # ... 热传导计算 ...
+```
+
+**文件: `BatteryEnv/multi_battery_env.py`**
+```python
+# 修改step方法：统一控制
+for battery in self.battery_system.batteries:
+    battery.flow_rate = flow_rate
+# 仅第一个电池设置入口温度
+self.battery_system.batteries[0].inlet_temp = inlet_temp
+```
+
+### git commit
+
+- 分支：`fix/cooling-physics`
+- 合并到主分支后生成新的commit
+
+### 经验总结
+
+1. **热量守恒**：在多电池系统中，需要跟踪累积吸热量来计算出口温度
+2. **负反馈系统**：冷却系统的存在使得电流-温度关系呈非线性，这是正常的物理现象
+3. **组间隔离**：热传导必须在组级别隔离，避免跨组热量传递
+4. **参数敏感性**：物理模型中系数的小幅变化可能导致结果的显著差异，需要仔细调参

@@ -1,6 +1,6 @@
 import numpy as np
 from gymnasium import spaces
-from BatteryEnv.muti_battery_module import MutiBattery as MB
+from BatteryEnv.multi_battery_module import MutiBattery as MB
 from tianshou.env import SubprocVectorEnv, DummyVectorEnv
 import gymnasium as gym
 import os
@@ -19,7 +19,7 @@ class MutiBatteryEnv(gym.Env):
                 current_sigma=2.5,      # 电流标准差
                 current_clip_range=(15, 35),  # 电流截断范围
                 flow_rate_range = (0,6),
-                inlet_temp_range = (273,310),
+                inlet_temp_range = (288, 295),  # 15-22°C
                 log_step = 1,
                 log_path = "",
                 con = True
@@ -119,7 +119,13 @@ class MutiBatteryEnv(gym.Env):
 
         action = np.array([flow_rate,inlet_temp],dtype=np.float32)
 
-        self.battery_system.batteries[0].set_action(inlet_temp, flow_rate)
+        # 设置所有电池的流速相同（由控制器统一控制）
+        # 只设置第一个电池的入口温度，后续电池的入口温度由冷却液流动物理决定
+        for battery in self.battery_system.batteries:
+            battery.flow_rate = flow_rate
+        # 第一个电池的入口温度由控制器设置
+        self.battery_system.batteries[0].inlet_temp = inlet_temp
+
         self.flow_rate_action_log.append(flow_rate)
         self.intel_temp_action_log.append(inlet_temp)
 

@@ -106,15 +106,65 @@ class SingleBattery:
         # print(f"电池中心温度: {self.temperature[center_x, center_y, center_z]}")
 
     def run(self, t_seconds):
+        """运行模拟，返回出口温度（用于多电池串联）"""
+        # 初始化累积吸热量
+        if not hasattr(self, 'cumulative_heat_absorbed'):
+            self.cumulative_heat_absorbed = 0.0
+
         num_steps = int(t_seconds / self.dt)
         for _ in range(num_steps):
             self.update_heat_generation()
             self.temperature = self.update_temperature_distribution()
-            self.apply_cooling()
+
+            # 应用液冷散热，获取本次吸热量
+            heat_this_step = self._apply_cooling_and_get_heat()
+
+            # 累积吸热量
+            self.cumulative_heat_absorbed += heat_this_step
+
             # 只有当有冷却液流动时才启用垂直方向的热扩散
             if self.flow_rate > 0:
                 self.temperature = self.diffuse_cooling()
             self.thermal_history.append(self.get_core_temperature())
+
+        # 计算出口温度
+        outlet_temp = self._calculate_outlet_temp()
+
+        return outlet_temp
+
+    def _apply_cooling_and_get_heat(self):
+        """应用冷却并返回吸热量"""
+        h = self.calculate_convective_coefficient(self.flow_rate)
+        cooling_boost = 500.0
+
+        bottom_layer_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 1)
+
+        heat_exchange = h * self.cell_length**2 * (self.temperature[bottom_layer_indices] - self.inlet_temp) * self.dt * cooling_boost
+        heat_exchange_layer2 = h * self.cell_length**2 * (self.temperature[bottom_layer_indices] - self.inlet_temp) * self.dt * cooling_boost * 0.3
+
+        # 底部降温
+        self.temperature[bottom_layer_indices] -= heat_exchange / (self.density * self.cell_length**3 * self.specific_heat)
+        layer2_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 2)
+        self.temperature[layer2_indices] -= heat_exchange_layer2 / (self.density * self.cell_length**3 * self.specific_heat)
+
+        # 更新入口温度
+        self.inlet_temp += 0.01 * (np.mean(self.temperature[bottom_layer_indices]) - self.inlet_temp)
+
+        return np.sum(heat_exchange) + np.sum(heat_exchange_layer2)
+
+    def _calculate_outlet_temp(self):
+        """根据累积吸热量计算出口温度"""
+        if self.flow_rate > 0 and hasattr(self, 'cumulative_heat_absorbed'):
+            cross_section_area = 0.01  # m²
+            mass_flow_rate = self.coolant_density * self.flow_rate * cross_section_area
+            if mass_flow_rate > 0 and self.coolant_specific_heat > 0:
+                delta_T = self.cumulative_heat_absorbed / (mass_flow_rate * self.coolant_specific_heat)
+                return self.inlet_temp + delta_T
+        return self.inlet_temp
+
+    def reset_heat_accumulation(self):
+        """重置累积热量"""
+        self.cumulative_heat_absorbed = 0.0
 
     def diffuse_cooling(self):
         """
@@ -169,6 +219,10 @@ class SingleBattery:
         return new_temp
    
     def apply_cooling(self):
+        """
+        应用底部液冷散热
+        返回: 出口温度（冷却液吸热后的温度）
+        """
         # 计算对流换热系数 (与流速相关)
         h = self.calculate_convective_coefficient(self.flow_rate)
 
@@ -193,10 +247,23 @@ class SingleBattery:
         layer2_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 2)
         self.temperature[layer2_indices] -= heat_exchange_layer2 / (self.density * self.cell_length**3 * self.specific_heat)
 
-        # 更新冷却液温度（降低系数，使入口温度保持较低）
+        # 计算吸收的总热量
+        total_heat_absorbed = np.sum(heat_exchange) + np.sum(heat_exchange_layer2)
+
+        # 累积吸热量（用于多电池串联计算出口温度）
+        if not hasattr(self, 'cumulative_heat_absorbed'):
+            self.cumulative_heat_absorbed = 0.0
+        self.cumulative_heat_absorbed += total_heat_absorbed
+
+        # 计算出口温度
+        outlet_temp = self._calculate_outlet_temp()
+
+        # 更新入口温度（为下一个时间步准备）
         self.inlet_temp += 0.01 * (
             np.mean(self.temperature[bottom_layer_indices]) - self.inlet_temp
         )
+
+        return outlet_temp
 
     def calculate_convective_coefficient(self, flow_rate):
         """

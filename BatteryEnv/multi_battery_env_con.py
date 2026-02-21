@@ -1,6 +1,6 @@
 import numpy as np
 from gymnasium import spaces
-from BatteryEnv.muti_battery_module import MutiBattery as MB
+from BatteryEnv.multi_battery_module import MutiBattery as MB
 from tianshou.env import SubprocVectorEnv, DummyVectorEnv
 import gymnasium as gym
 import os

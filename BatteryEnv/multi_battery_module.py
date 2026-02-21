@@ -42,40 +42,48 @@ class MutiBattery:
 
     def run(self, t_seconds):
         """运行模拟指定时间"""
+        # 重置每个电池的累积吸热量
+        for battery in self.batteries:
+            battery.cumulative_heat_absorbed = 0.0
+
         num_steps = int(t_seconds / self.batteries[0].dt)
         for step in range(num_steps):
-            # 第一个电池使用初始温度
-            # self.batteries[0].inlet_temp = self.initial_coolant_temp
-            
             # 按顺序处理每个电池
             for i in range(self.total_batteries):
                 battery = self.batteries[i]
-                
+
                 # 更新热生成和温度分布
                 battery.update_heat_generation()
                 battery.temperature = battery.update_temperature_distribution()
-                
-                # 应用液冷散热
-                battery.apply_cooling()
-                
+
+                # 应用液冷散热，获取出口温度
+                outlet_temp = battery.apply_cooling()
+
                 # 冷却后再次更新温度分布
                 battery.temperature = battery.diffuse_cooling()
-                
+
                 # 如果不是最后一个电池，将当前电池的出口温度传递给下一个电池
+                # 冷却液吸热后温度升高，所以后面的电池入口温度更高
                 if i < self.total_batteries - 1:
-                    self.batteries[i + 1].inlet_temp = battery.inlet_temp
-                
+                    self.batteries[i + 1].inlet_temp = outlet_temp
+
                 # 记录温度
                 self.temperature_history[i].append(battery.get_core_temperature())
-                self.coolant_history[i].append(battery.inlet_temp)
-            
+                # 记录入口温度
+                if i == 0:
+                    # 第一个电池记录初始入口温度
+                    self.coolant_history[i].append(self.batteries[0].inlet_temp)
+                else:
+                    # 其他电池记录来自上一个电池的入口温度
+                    self.coolant_history[i].append(self.batteries[i].inlet_temp)
+
             # 记录时间步（使用累积时间）
             current_time = self.total_time + step * self.batteries[0].dt
             self.time_steps.append(current_time)
-            
+
             # 应用组内电池之间的热传导
             self.apply_inter_battery_heat_transfer()
-        
+
         # 更新总时间
         self.total_time += t_seconds
 
