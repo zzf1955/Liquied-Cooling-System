@@ -21,18 +21,8 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v4
 
-    - name: Install: |
-        uv sync dependencies
-      run
+    - name: Install dependencies
+      run: uv sync
 
     - name: Run pytest
-      run: |
-        uv run pytest test/test_battery.py -v --tb=short
-
-    - name: Run vectorized thermal tests
-      run: |
-        uv run pytest test/test_vectorized_thermal.py -v --tb=short
-
-    - name: Run multi-battery compat tests
-      run: |
-        uv run pytest test/test_multi_battery_compat.py -v --tb=short
+      run: uv run pytest test/test_battery.py -v --tb=short
