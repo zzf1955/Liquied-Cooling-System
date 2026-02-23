@@ -172,51 +172,81 @@ class SingleBattery:
         扩散是从底面 z=1 向上扩散，z方向为主。
         使用绝热边界条件 - 热量不流出电池。
         修改：减少距离衰减，使底部冷却效果能保留
-        """
-        new_temp = np.copy(self.temperature)
 
+        向量化实现版本
+        """
         # 扩散因子（固定值，不再随距离衰减）
         diffusion_factor = 0.02
 
-        for k in range(1, self.grid_size_z + 1):
-            for i in range(1, self.grid_size_x + 1):
-                for j in range(1, self.grid_size_y + 1):
-                    # 绝热边界条件
-                    if k == 1:
-                        # 底部第一层：热量不流出
-                        z_diffusion = 0
-                    else:
-                        z_diffusion = self.temperature[i, j, k-1] - self.temperature[i, j, k]
+        T = self.temperature
+        gx, gy, gz = self.grid_size_x, self.grid_size_y, self.grid_size_z
 
-                    # 更新温度
-                    new_temp[i, j, k] = self.temperature[i, j, k] + self.adjusting_factor * diffusion_factor * self.alpha * self.dt / self.cell_length**2 * z_diffusion
+        # 计算 z 方向温差 (仅内部格点)
+        # z_diffusion[i,j,k] = T[i,j,k] - T[i,j,k+1] 表示热量从下往上传递
+        # 对应原代码: z_diffusion = T[i,j,k-1] - T[i,j,k]
+        z_diffusion = T[1:gx+1, 1:gy+1, 1:gz] - T[1:gx+1, 1:gy+1, 2:gz+1]
 
-        return new_temp
+        # 更新温度 (从第2层开始，第1层是绝热边界不更新)
+        # 注意：原代码 k 范围是 1 到 gz，对应 z 索引 1 到 gz
+        # 这里我们只更新内部格点，边界层由后续绝热边界处理
+        self.temperature[1:gx+1, 1:gy+1, 2:gz+1] += (
+            self.adjusting_factor * diffusion_factor * self.alpha * self.dt / self.cell_length**2 * z_diffusion
+        )
+
+        # 绝热边界条件处理
+        # 底部 (k=1): 热量不流出 - 已经在上面跳过更新
+        # 其他边界: 使用相邻内部层的值
+        self.temperature[0, :, :] = self.temperature[1, :, :]
+        self.temperature[-1, :, :] = self.temperature[-2, :, :]
+        self.temperature[:, 0, :] = self.temperature[:, 1, :]
+        self.temperature[:, -1, :] = self.temperature[:, -2, :]
+        self.temperature[:, :, 0] = self.temperature[:, :, 1]
+        self.temperature[:, :, -1] = self.temperature[:, :, -2]
+
+        return self.temperature
 
     def update_temperature_distribution(self):
         """
         更新电池内部温度分布（热扩散）
         简化版本，标准热扩散方程，绝热边界
+
+        向量化实现版本：使用 NumPy 广播机制进行三维热扩散计算
         """
-        new_temp = np.copy(self.temperature)
+        T = self.temperature
+        gx, gy, gz = self.grid_size_x, self.grid_size_y, self.grid_size_z
 
-        # 简单的热扩散（不使用距离衰减）
-        for i in range(1, self.grid_size_x + 1):
-            for j in range(1, self.grid_size_y + 1):
-                for k in range(1, self.grid_size_z + 1):
-                    # 绝热边界条件
-                    T_ip1 = self.temperature[i+1, j, k] if i < self.grid_size_x else self.temperature[i, j, k]
-                    T_im1 = self.temperature[i-1, j, k] if i > 1 else self.temperature[i, j, k]
-                    T_jp1 = self.temperature[i, j+1, k] if j < self.grid_size_y else self.temperature[i, j, k]
-                    T_jm1 = self.temperature[i, j-1, k] if j > 1 else self.temperature[i, j, k]
-                    T_kp1 = self.temperature[i, j, k+1] if k < self.grid_size_z else self.temperature[i, j, k]
-                    T_km1 = self.temperature[i, j, k-1] if k > 1 else self.temperature[i, j, k]
+        # 先应用绝热边界条件，确保边界值等于相邻内部值
+        # 这样在计算拉普拉斯算子时能正确使用绝热边界
+        T[0, :, :] = T[1, :, :]
+        T[-1, :, :] = T[-2, :, :]
+        T[:, 0, :] = T[:, 1, :]
+        T[:, -1, :] = T[:, -2, :]
+        T[:, :, 0] = T[:, :, 1]
+        T[:, :, -1] = T[:, :, -2]
 
-                    # 标准热扩散方程
-                    new_temp[i, j, k] = self.temperature[i, j, k] + self.alpha * self.dt / self.cell_length**2 * (
-                        T_ip1 + T_im1 + T_jp1 + T_jm1 + T_kp1 + T_km1 - 6 * self.temperature[i, j, k])
+        # 计算拉普拉斯算子 (Standard 7-point stencil for 3D)
+        # T[x, y, z] 的变化取决于上下左右前后的温差
+        # 注意：原始代码中 i 范围是 1 到 gx，对应 numpy 索引 1 到 gx+1
+        # 所以 T[1:gx+2] 对应内部格点，T[2:gx+2] 对应 i+1，T[:gx+1] 对应 i-1
+        delta_T = (
+            T[2:gx+2, 1:gy+1, 1:gz+1] + T[:gx, 1:gy+1, 1:gz+1] +  # X 方向
+            T[1:gx+1, 2:gy+2, 1:gz+1] + T[1:gx+1, :gy, 1:gz+1] +  # Y 方向
+            T[1:gx+1, 1:gy+1, 2:gz+2] + T[1:gx+1, 1:gy+1, :gz] -  # Z 方向
+            6 * T[1:gx+1, 1:gy+1, 1:gz+1]
+        )
 
-        return new_temp
+        # 更新温度网格（仅更新内部点）
+        self.temperature[1:gx+1, 1:gy+1, 1:gz+1] += self.alpha * self.dt / self.cell_length**2 * delta_T
+
+        # 再次应用绝热边界条件
+        self.temperature[0, :, :] = self.temperature[1, :, :]
+        self.temperature[-1, :, :] = self.temperature[-2, :, :]
+        self.temperature[:, 0, :] = self.temperature[:, 1, :]
+        self.temperature[:, -1, :] = self.temperature[:, -2, :]
+        self.temperature[:, :, 0] = self.temperature[:, :, 1]
+        self.temperature[:, :, -1] = self.temperature[:, :, -2]
+
+        return self.temperature
    
     def apply_cooling(self):
         """
