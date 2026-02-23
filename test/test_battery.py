@@ -8,6 +8,9 @@ Tests for:
 - Physical behavior validation
 - Numerical stability
 """
+import sys
+sys.path.insert(0, '/mnt/data/hejiakai/Liquied-Cooling-System')
+
 import numpy as np
 import pytest
 from functools import partial
