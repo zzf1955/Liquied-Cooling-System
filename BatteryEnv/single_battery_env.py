@@ -87,8 +87,8 @@ class SingleBatteryEnv(gym.Env):
         if self.current_step % self.change_steps == 0:
             # 改为正态分布更符合实际
             self.battery.current = np.clip(
-                np.random.normal(loc=25, scale=2.5),  # 均值25A，标准差2.5A
-                self.min_current, 
+                self.np_random.normal(loc=25, scale=2.5),  # 均值25A，标准差2.5A
+                self.min_current,
                 self.max_current
             )
 
@@ -134,7 +134,6 @@ class SingleBatteryEnv(gym.Env):
     def reset(self, seed=None, randomize_current=False):
         # 重置环境状态
         super().reset(seed=seed)
-        np.random.seed(seed)
 
         self.battery.inlet_temp = self.environment_temp
         self.battery.flow_rate = 0.1  # 初始化流速为默认值
@@ -142,7 +141,7 @@ class SingleBatteryEnv(gym.Env):
 
         if randomize_current:
             # 随机设置电流
-            self.battery.current = np.random.uniform(self.min_current, self.max_current)
+            self.battery.current = self.np_random.uniform(self.min_current, self.max_current)
         else:
             # 重置电流为0
             self.battery.current = 0

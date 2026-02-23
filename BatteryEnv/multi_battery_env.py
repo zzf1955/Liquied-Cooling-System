@@ -131,7 +131,7 @@ class MutiBatteryEnv(gym.Env):
 
         current_log_ = []
         for group_index in range(self.num_groups):
-            if np.random.rand()<=self.current_change_prob:
+            if self.np_random.random()<=self.current_change_prob:
                 if self.battery_system.get_group_current(group_idx=group_index) == 0:
                     self.battery_system.set_group_current(group_idx=group_index,current=self.current_mu)
                 else:
@@ -267,7 +267,6 @@ class MutiBatteryEnv(gym.Env):
         self.current_log = []
 
         super().reset(seed=seed)
-        np.random.seed(seed)   
 
         # 重置所有电池的状态
         for battery in self.battery_system.batteries:
@@ -275,7 +274,7 @@ class MutiBatteryEnv(gym.Env):
             battery.flow_rate = 0  # 初始化流速为默认值
 
             if randomize_init_current:
-                current = np.random.normal(self.current_mu, self.current_sigma)
+                current = self.np_random.normal(self.current_mu, self.current_sigma)
                 current = np.clip(current, *self.current_clip_range)
                 for battery in self.battery_system.batteries:
                     battery.current = current
