@@ -517,3 +517,34 @@ self.battery_system.batteries[0].inlet_temp = inlet_temp
 1. **测试整合**：将分散的测试整合到统一的 pytest 文件中，便于维护和 CI
 2. **参考实现**：创建参考实现时需要确保方法正确绑定到实例
 3. **CI 验证**：GitHub Actions 可以自动验证代码正确性
+
+---
+
+## 2025-02-24: 修复随机数种子问题
+
+### 问题 (Reviewer 反馈)
+- 在 `reset` 方法中使用 `np.random.seed(seed)` 会重置全局随机状态
+- 在并行环境（如 `SubprocVectorEnv`）中会导致所有子进程产生相同的随机序列
+
+### 解决方案
+- 使用 Gymnasium 推荐的 `self.np_random` 生成器
+- 调用 `super().reset(seed=seed)` 后自动设置
+
+### 修改内容
+
+| 文件 | 修改 |
+|------|------|
+| single_battery_env.py | 移除 `np.random.seed`，使用 `self.np_random.uniform` |
+| multi_battery_env.py | 移除 `np.random.seed`，使用 `self.np_random.normal/random` |
+| multi_battery_env_con.py | 移除 `np.random.seed`，使用 `self.np_random.normal/random` |
+
+### 测试验证
+- ✓ 17 个测试全部通过
+
+### git commit
+- 分支：`fix/random-seed-usage`
+- commit ID: `0fbe1e0`
+
+### 经验总结
+1. **并行环境随机数**：在 SubprocVectorEnv 等并行环境中，应使用 `self.np_random` 而非全局 `np.random`
+2. **Gymnasium 规范**：遵循 Gymnasium 的随机数管理最佳实践
