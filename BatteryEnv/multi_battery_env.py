@@ -237,7 +237,7 @@ class MutiBatteryEnv(gym.Env):
                 # 检查列表长度是否一致，如果不一致可能需要调整数据准备逻辑
                 if not (len(self.allrew) == len(self.flow_rate_action_log) == len(self.intel_temp_action_log) == len(self.core_temp_log) == len(self.current_log)):
                     print(f"Warning: Log data lists have different lengths at episode {self.episode_cnt}. Skipping log generation for this episode.")
-                    assert False, "Log data lists have different lengths"
+                    raise RuntimeError("Log data lists have different lengths")
                 else:
                     # 准备数据写入 DataFrame
                     log_data = {
