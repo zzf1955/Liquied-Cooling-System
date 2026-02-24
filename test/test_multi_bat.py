@@ -4,13 +4,13 @@ sys.path.insert(0, '/mnt/g/github_project/Liquied-Cooling-System')
 import numpy as np
 import matplotlib.pyplot as plt
 import copy
-from BatteryEnv.multi_battery_module import MutiBattery
+from BatteryEnv.multi_battery_module import MultiBattery
 
 def run_comparison_simulation(duration_steps=500):
     # 1. 初始化两个完全相同的系统
     # 减少电池数量以便清晰观察传导效果 (1组5个)
-    sys_bugged = MutiBattery(num_batteries_per_group=5, num_groups=1)
-    sys_fixed = MutiBattery(num_batteries_per_group=5, num_groups=1)
+    sys_bugged = MultiBattery(num_batteries_per_group=12, num_groups=4)
+    sys_fixed = MultiBattery(num_batteries_per_group=12, num_groups=4)
 
     # 2. 定义错误逻辑函数 (模拟修改前)
     def bugged_transfer(self):
@@ -37,15 +37,15 @@ def run_comparison_simulation(duration_steps=500):
 
     print("正在模拟错误逻辑 (Bugged)...")
     # 临时替换方法
-    original_method = MutiBattery.apply_inter_battery_heat_transfer
-    MutiBattery.apply_inter_battery_heat_transfer = bugged_transfer
+    original_method = MultiBattery.apply_inter_battery_heat_transfer
+    MultiBattery.apply_inter_battery_heat_transfer = bugged_transfer
     for _ in range(duration_steps):
         sys_bugged.run(t_seconds=1)
         results_bugged.append(sys_bugged.get_all_core_temperatures()[:5])
 
     print("正在模拟修正逻辑 (Fixed)...")
     # 恢复原有的修正后方法
-    MutiBattery.apply_inter_battery_heat_transfer = original_method
+    MultiBattery.apply_inter_battery_heat_transfer = original_method
     for _ in range(duration_steps):
         sys_fixed.run(t_seconds=1)
         results_fixed.append(sys_fixed.get_all_core_temperatures()[:5])

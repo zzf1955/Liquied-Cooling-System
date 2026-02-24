@@ -160,27 +160,23 @@ class SingleBattery:
         if self.flow_rate <= 0:
             self.last_step_heat = 0.0
             return self.inlet_temp
-        
+
         # 计算对流换热系数 (与流速相关)
         h = self.calculate_convective_coefficient(self.flow_rate)
 
-        # 调试日志
-        # logger.debug(f"[apply_cooling] flow_rate={self.flow_rate}, h={h:.2f}, inlet_temp={self.inlet_temp:.2f}")
-
-        # 增强冷却效果的系数
-        cooling_boost = 500.0
+        # 增强冷却效果的系数 - 适度增加
+        cooling_boost = 10.0
 
         # 1. 确定参与换热的层（底部层）
         bottom_layer_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 1)
         layer2_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 2)
 
         # 2. 计算本步热交换能量 Q (单位: J)
-        # 公式: Q = h * A * (T_surface - T_inlet) * dt
-        # heat_exchange = h * self.cell_length**2 * (self.temperature[bottom_layer_indices] - self.inlet_temp) * self.dt * cooling_boost
-        heat_exchange = h * self.cell_length**2 * (self.temperature[bottom_layer_indices] - self.inlet_temp) * self.dt
+        # 公式: Q = h * A * (T_surface - T_inlet) * dt * cooling_boost
+        heat_exchange = h * self.cell_length**2 * (self.temperature[bottom_layer_indices] - self.inlet_temp) * self.dt * cooling_boost
 
         # 同时也考虑第二层的一定换热（模拟对流穿透效应）
-        heat_exchange_layer2 = heat_exchange * 0.3
+        heat_exchange_layer2 = heat_exchange * 0.5
         
         # 3. 更新电池内部温度 (ΔT = Q / (rho * V * Cp))
         volume = self.cell_length ** 3
@@ -237,12 +233,12 @@ class SingleBattery:
         将底部冷却后的温度扩散到整个三维电池。
         扩散是从底面 z=1 向上扩散，z方向为主。
         使用绝热边界条件 - 热量不流出电池。
-        修改：减少距离衰减，使底部冷却效果能保留
 
         向量化实现版本
+        修改：减小 diffusion_factor 以增加温差
         """
-        # 扩散因子（固定值，不再随距离衰减）
-        diffusion_factor = 0.02
+        # 扩散因子 - 减小以增加电池内部垂直温差
+        diffusion_factor = 0.005
 
         T = self.temperature
         gx, gy, gz = self.grid_size_x, self.grid_size_y, self.grid_size_z
