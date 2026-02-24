@@ -1,6 +1,9 @@
+import sys
+sys.path.insert(0, '/mnt/g/github_project/Liquied-Cooling-System')
+
 import numpy as np
 import matplotlib.pyplot as plt
-from single_battery_module import SingleBattery
+from BatteryEnv.single_battery_module import SingleBattery
 import time
 
 def run_simulation(battery, duration, current, flow, inlet_t):
@@ -54,7 +57,7 @@ def test_battery_performance():
     
     # --- 3. 流速敏感性测试 ---
     print("正在进行流速敏感性测试...")
-    flows = [0.5, 2.0, 5.0]
+    flows = [0.5, 2, 5]
     flow_results = {}
     for f in flows:
         bat = SingleBattery()
@@ -139,7 +142,7 @@ def run_comprehensive_tests():
 
     # --- Case 3 & 4: 流速与入口温度敏感性 ---
     print("正在运行 Case 3 & 4: 敏感性分析...")
-    flow_tests = [0.5, 2.0, 5.0]
+    flow_tests = [0.5, 2, 5]
     inlet_tests = [285, 290, 295]
     res_flow = {}; res_inlet = {}
     

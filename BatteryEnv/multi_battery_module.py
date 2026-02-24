@@ -1,112 +1,123 @@
-# from BatteryEnv.single_battery_module import SingleBattery
-from BatteryEnv.single_battery_module import SingleBattery
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
+from BatteryEnv.single_battery_module import SingleBattery
 
-class MutiBattery:
-    def __init__(self, num_batteries_per_group=13, num_groups=4, env_temp = 300,voltage = 3.2):
+class MultiBattery:
+    def __init__(self, num_batteries_per_group=13, num_groups=4, env_temp=300, voltage=3.2):
         """
         初始化多电池系统
-        
+
         参数:
             num_batteries_per_group: 每组电池的数量，默认为13
             num_groups: 电池组的数量，默认为4
-            **kwargs: 传递给SingleBattery的其他参数
+            env_temp: 环境温度
+            voltage: 电池电压
         """
         self.num_batteries_per_group = num_batteries_per_group
         self.num_groups = num_groups
         self.total_batteries = num_batteries_per_group * num_groups
-        
+
         # 初始化电池（配置串联电压）
-        self.batteries = [SingleBattery(voltage=voltage,env_temperature=env_temp) for _ in range(self.total_batteries)]
+        self.batteries = [SingleBattery(voltage=voltage, env_temperature=env_temp) for _ in range(self.total_batteries)]
 
         # 冷却液初始温度，入口温度
         self.initial_coolant_temp = env_temp
-            
+
         # 记录每个电池所属的组
         self.battery_groups = {}
         for i in range(self.total_batteries):
             group_id = i // num_batteries_per_group
             self.battery_groups[i] = group_id
-            
+
         # 初始化温度记录
         self.temperature_history = [[] for _ in range(self.total_batteries)]
         self.coolant_history = [[] for _ in range(self.total_batteries)]
         self.time_steps = []
-        self.total_time = 0  # 添加总时间变量
 
+        self.total_time = 0.0  # 添加总时间变量
+
+        self.reset_logs()
+    
+    def reset_logs(self):
+        """重置数据记录器"""
+        self.temperature_history = [[] for _ in range(self.total_batteries)]
+        self.coolant_history = [[] for _ in range(self.total_batteries)]
+        self.time_steps = []
+        
     def reset(self):
-        """重置所有电池"""
+        """级联重置所有电池状态"""
         for battery in self.batteries:
             battery.reset()
-
+        self.total_time = 0.0
+        self.reset_logs()
+        
+    def _apply_inter_battery_heat_transfer(self, dt):
+        """
+        修正后的组间传热逻辑：消除 100 倍误差
+        """
+        for group in range(self.num_groups):
+            start = group * self.num_batteries_per_group
+            
+            for i in range(self.num_batteries_per_group - 1):
+                front = self.batteries[start + i]
+                rear = self.batteries[start + i + 1]
+                
+                # 表面温度提取
+                # t_f = front.temperature[..., -2]  # 前电池后表面
+                # t_r = rear.temperature[..., 1]   # 后电池前表面
+                
+                t_f = front.temperature[-2, 1:-1, 1:-1]  # 前电池后表面
+                t_r = rear.temperature[1, 1:-1, 1:-1]   # 后电池前表面
+                
+                # 计算热量交换
+                temp_diff = t_f - t_r
+                
+                # 物理计算：ΔT = alpha * dt / L^2 * (T_diff)
+                # 这保证了热量交换在电池间是真实且守恒的
+                alpha = front.thermal_conductivity / (front.density * front.specific_heat)
+                temp_step = alpha * temp_diff * dt / (front.cell_length**2)
+                
+                front.temperature[-2, 1:-1, 1:-1] -= temp_step
+                rear.temperature[1, 1:-1, 1:-1] += temp_step
+                # front.temperature[..., -2] -= temp_step
+                # rear.temperature[..., 1] += temp_step
+    
     def run(self, t_seconds):
-        """运行模拟指定时间"""
-        # 重置每个电池的累积吸热量
-        for battery in self.batteries:
-            battery.cumulative_heat_absorbed = 0.0
-
-        num_steps = int(t_seconds / self.batteries[0].dt)
-        for step in range(num_steps):
-            # 按顺序处理每个电池
+        """
+        核心运行逻辑：物理计算与 RL 接口对齐
+        """
+        # 以第一个电池的物理步长为基准
+        dt = self.batteries[0].dt
+        num_steps = int(t_seconds / dt)
+        
+        for _ in range(num_steps):
+            # 1. 串联冷却链条更新
+            # 冷却液从第一个电池流向最后一个，入口温度实时流转
+            current_coolant_in = self.batteries[0].inlet_temp 
+            
             for i in range(self.total_batteries):
                 battery = self.batteries[i]
-
-                # 更新热生成和温度分布
+                battery.inlet_temp = current_coolant_in
+                
+                # 执行物理原子操作
                 battery.update_heat_generation()
-                battery.temperature = battery.update_temperature_distribution()
-
-                # 应用液冷散热，获取出口温度
-                outlet_temp = battery.apply_cooling()
-
-                # 冷却后再次更新温度分布
-                battery.temperature = battery.diffuse_cooling()
-
-                # 如果不是最后一个电池，将当前电池的出口温度传递给下一个电池
-                # 冷却液吸热后温度升高，所以后面的电池入口温度更高
-                if i < self.total_batteries - 1:
-                    self.batteries[i + 1].inlet_temp = outlet_temp
-
-                # 记录温度
-                self.temperature_history[i].append(battery.get_core_temperature())
-                # 记录入口温度
-                if i == 0:
-                    # 第一个电池记录初始入口温度
-                    self.coolant_history[i].append(self.batteries[0].inlet_temp)
-                else:
-                    # 其他电池记录来自上一个电池的入口温度
-                    self.coolant_history[i].append(self.batteries[i].inlet_temp)
-
-            # 记录时间步（使用累积时间）
-            current_time = self.total_time + step * self.batteries[0].dt
-            self.time_steps.append(current_time)
-
-            # 应用组内电池之间的热传导
-            self.apply_inter_battery_heat_transfer()
-
-        # 更新总时间
-        self.total_time += t_seconds
-
-    def apply_inter_battery_heat_transfer(self):
-        """应用组内电池之间的前后方向热传导"""
-        for group in range(self.num_groups):
-            group_batteries = self.batteries[group*self.num_batteries_per_group : (group+1)*self.num_batteries_per_group]
+                battery.update_temperature_distribution()
+                
+                # apply_cooling 立即返回该电池的出口温度，作为下一个的入口
+                current_coolant_in = battery.apply_cooling()
+                
+                battery.diffuse_cooling()
             
-            # 二维排列假设：每行13个电池，按前后方向排列
-            for row in range(len(group_batteries)-1):
-                front = group_batteries[row]
-                rear = group_batteries[row+1]
-                
-                # 前电池后表面与后电池前表面传导
-                front_surface = front.temperature[..., -2]  # 前电池的后表面
-                rear_surface = rear.temperature[..., 1]    # 后电池的前表面
-                
-                temp_diff = front_surface - rear_surface
-                heat_transfer = front.thermal_conductivity * temp_diff / front.cell_length * front.dt
-                
-                front.temperature[..., -2] -= heat_transfer / (front.density * front.specific_heat)
-                rear.temperature[..., 1] += heat_transfer / (rear.density * rear.specific_heat)
+            # 2. 组间传热 (每步物理步长平衡一次)
+            self._apply_inter_battery_heat_transfer(dt)
 
+        # 3. 数据采样：每个 RL Step 执行完记录一次（极大提升训练速度）
+        self.total_time += t_seconds
+        for i, battery in enumerate(self.batteries):
+            self.temperature_history[i].append(battery.get_core_temperature())
+            self.coolant_history[i].append(battery.inlet_temp)
+        self.time_steps.append(self.total_time)
+    
     def get_all_core_temperatures(self):
         """获取所有电池的核心温度"""
         return [battery.get_core_temperature() for battery in self.batteries]
@@ -114,11 +125,11 @@ class MutiBattery:
     def get_all_top_surface_average_temperatures(self):
         """获取所有电池顶面的平均温度"""
         return [battery.get_top_surface_average_temperature() for battery in self.batteries]
-    
+
     def get_all_bottom_surface_average_temperatures(self):
         """获取所有电池底面的平均温度"""
         return [battery.get_bottom_surface_average_temperature() for battery in self.batteries]
-    
+
     def get_group_average_temperatures(self):
         """获取每组电池的平均核心温度"""
         group_temps = []
@@ -129,184 +140,28 @@ class MutiBattery:
             avg_temp = sum(b.get_core_temperature() for b in group_batteries) / len(group_batteries)
             group_temps.append(avg_temp)
         return group_temps
-
-    def get_group_average_voltages(self):
-        """获取每组电池的总电压（串联）"""
-        group_voltages = []
-        for group in range(self.num_groups):
-            start_idx = group * self.num_batteries_per_group
-            end_idx = start_idx + self.num_batteries_per_group
-            group_batteries = self.batteries[start_idx:end_idx]
-            # 串联时总电压为所有电池电压之和
-            total_voltage = sum(b.get_voltage() for b in group_batteries)
-            group_voltages.append(total_voltage)
-        return group_voltages
-
-    def get_group_current(self, group_idx):
-        """获取指定组的电流（串联时组内所有电池电流相同）"""
-        start_idx = group_idx * self.num_batteries_per_group
-        # 返回组内任意一个电池的电流即可
-        return self.batteries[start_idx].current
-
+    
+    def get_group_stats(self, group_idx):
+        """获取指定组的聚合状态（均值/总和）"""
+        start = group_idx * self.num_batteries_per_group
+        end = start + self.num_batteries_per_group
+        group_bs = self.batteries[start:end]
+        
+        return {
+            'avg_core': np.mean([battery.get_core_temperature() for battery in group_bs]),
+            'avg_top': np.mean([battery.get_top_surface_average_temperature() for battery in group_bs]),
+            'avg_bot': np.mean([battery.get_bottom_surface_average_temperature() for battery in group_bs]),
+            'total_voltage': sum(battery.get_voltage() for battery in group_bs),
+            'current': group_bs[0].current
+        }
+        
+    def set_group_controls(self, flow_rate, inlet_temp):
+        """统一设置所有电池的流速，并设置第一个电池的入口温度"""
+        for battery in self.batteries:
+            battery.flow_rate = flow_rate
+        self.batteries[0].inlet_temp = inlet_temp
+    
     def set_group_current(self, group_idx,current):
         start_idx = group_idx * self.num_batteries_per_group
         for bettery_idx in range(start_idx,start_idx+self.num_batteries_per_group):
-            self.batteries[bettery_idx].current = current;
-
-
-    def plot_temperature_history(self, battery_indices=None):
-        """绘制温度变化曲线"""
-        if battery_indices is None:
-            battery_indices = [0, 13, 26, 39]  # 默认显示每组的第一个电池
-            
-        plt.figure(figsize=(12, 6))
-        
-        # 绘制核心温度
-        plt.subplot(1, 2, 1)
-        for i in battery_indices:
-            plt.plot(self.time_steps, self.temperature_history[i], 
-                    label=f'battery {i+1} core temperature')
-        plt.xlabel('time (s)')
-        plt.ylabel('temperature (K)')
-        plt.title('core temperaterature change')
-        plt.legend()
-        plt.grid(True)
-        
-        # 绘制冷却液温度
-        plt.subplot(1, 2, 2)
-        for i in battery_indices:
-            plt.plot(self.time_steps, self.coolant_history[i], 
-                    label=f'battery {i+1} coolant temperature')
-        plt.xlabel('time (s)')
-        plt.ylabel('temperature (K)')
-        plt.title('coolant temperaterature change')
-        plt.legend()
-        plt.grid(True)
-        
-        plt.tight_layout()
-        plt.show()
-
-def test_muti_battery():
-    # 创建4组电池，每组13个
-    muti_battery = MutiBattery(num_batteries_per_group=13, num_groups=4)
-
-    t_seconds = 1  # 每次运行的模拟时间
-    # steps = 999999999  # 运行多少次迭代
-    steps = 2000
-    
-    # flow_rate_state = [0.2 * i for i in range(30)]
-    flow_rate_state = [4]
-    # flow_rate_state = [3]
-    # inlet_temp_state = [288 + 0.4 * i for i in range(30)]
-    inlet_temp_state = [293, 294, 293, 292, 291]
-
-    for step in range(steps):
-        print(f"\n--- Step {step + 1} ---")
-        print(f"Current total simulation time: {muti_battery.total_time:.2f} seconds")        
-        
-        for i in range(muti_battery.total_batteries):
-            battery = muti_battery.batteries[i]
-            battery.current = 30.0
-            # battery.set_action(inlet_temp_state[step % 30], flow_rate_state[step % 30])
-            battery.set_action(inlet_temp_state[int(step / 400)], flow_rate_state[0])
-
-        # 运行模拟
-        muti_battery.run(t_seconds)
-
-        # 显示每个组的平均核心温度
-        group_temps = muti_battery.get_group_average_temperatures()
-        for i, temp in enumerate(group_temps):
-            print(f"Group {i + 1} Average Core Temperature: {temp:.2f} K")
-        
-        # 显示选定的一些电池的详细信息
-        selected_batteries = [0, 13, 26, 39]  # 每组的第一个电池
-        for i in selected_batteries:
-            battery = muti_battery.batteries[i]
-            core_temp = battery.get_core_temperature()
-            top_temp = battery.get_top_surface_average_temperature()
-            bottom_temp = battery.get_bottom_surface_average_temperature()
-            current = battery.current
-            flow_rate = battery.flow_rate
-            inlet_temp = battery.inlet_temp
-            group_id = i // muti_battery.num_batteries_per_group
-            
-            print(f"Battery {i} (Group {group_id}): Core={core_temp:.2f}K, Top={top_temp:.2f}K, Bottom={bottom_temp:.6f}K, " 
-                  f"Current={current:.6f}A, Flow={flow_rate:.2f}m/s, Inlet={inlet_temp:.6f}K")
-
-        # 等待用户输入
-        # user_input = input("Press Enter to continue, or 'b' to modify battery parameters: ").strip()
-
-        # if user_input.lower() == 'b':
-        #     # 允许用户修改组级别的参数
-        #     for group in range(muti_battery.num_groups):
-        #         try:
-        #             print(f"--- Group {group + 1} Parameters ---")
-        #             current = float(input(f"Enter output current for all batteries in Group {group + 1} (A): "))
-        #             flow_rate = float(input(f"Enter cooling flow rate for all batteries in Group {group + 1} (m/s): "))
-        #             inlet_temp = float(input(f"Enter inlet cooling temperature for all batteries in Group {group + 1} (K): "))
-                    
-        #             # 更新该组所有电池的参数
-        #             start_idx = group * muti_battery.num_batteries_per_group
-        #             end_idx = start_idx + muti_battery.num_batteries_per_group
-        #             for i in range(start_idx, end_idx):
-        #                 battery = muti_battery.batteries[i]
-        #                 battery.current = current
-        #                 battery.flow_rate = flow_rate
-        #                 battery.inlet_temp = inlet_temp
-        #         except ValueError:
-        #             print("Invalid input, using previous values.")
-
-        # elif user_input == '':
-        #     continue
-
-    # 绘制温度变化曲线
-    muti_battery.plot_temperature_history()
-
-if __name__ == "__main__":
-    test_muti_battery()
-
-'''
-test input:
-冷却液高温
-0
-0.1
-298
-0
-0.1
-298
-0
-0.1
-330
-0
-0.1
-298
-
-高输出
-0
-0.1
-298
-10
-0.1
-298
-0
-0.1
-298
-0
-0.1
-298
-
-冷却液降温
-0
-0.1
-298
-10
-0.1
-270
-0
-0.1
-298
-0
-0.1
-298
-
-'''
+            self.batteries[bettery_idx].current = current
