@@ -168,7 +168,7 @@ class SingleBattery:
         # logger.debug(f"[apply_cooling] flow_rate={self.flow_rate}, h={h:.2f}, inlet_temp={self.inlet_temp:.2f}")
 
         # 增强冷却效果的系数
-        cooling_boost = 500.0
+        # cooling_boost = 500.0
 
         # 1. 确定参与换热的层（底部层）
         bottom_layer_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 1)
