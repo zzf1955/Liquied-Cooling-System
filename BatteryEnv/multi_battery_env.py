@@ -15,14 +15,14 @@ class MutiBatteryEnv(gym.Env):
                 min_battery_tmp=288,
                 env_temp=300, 
                 current_change_prob=0.05,
-                current_mu=20,          # 电流均值
-                current_sigma=2.5,      # 电流标准差
-                current_clip_range=(15, 35),  # 电流截断范围
+                current_mu=30,
+                current_sigma=10,
+                current_clip_range=(0, 50),
                 flow_rate_range = (0, 3),
-                inlet_temp_range = (288, 295),  # 15-22°C
-                log_step = 1,
+                inlet_temp_range = (288, 295),
+                log_step = 100, # 增加步数，减少写入频率
                 log_path = "",
-                con = True
+                con = True,
                 ):
         
         super(MutiBatteryEnv, self).__init__()
