@@ -28,11 +28,21 @@ class SingleBattery:
                  
                  # 环境参数
                  env_temperature=300.0,    # 环境温度 (K)
+                 
+                 # 特殊超参数
+                 adjusting_factor = 3.0,      # 调整系数（用来调整电池冷却温度的传递的传递)
+                 cooling_boost = 10.0,          # 冷却增强系数
+                 diffusion_factor = 0.005       # 热扩散系数
                 ):
         
         # 调整系数（用来调整电池冷却温度的传递的传递)
         # 增加此系数以加快热传导，使动作效果在约10步内可见
-        self.adjusting_factor = 3.0
+        self.adjusting_factor = adjusting_factor
+        
+        # 冷却增强系数
+        self.cooling_boost = cooling_boost
+        
+        self.diffusion_factor = diffusion_factor
 
         # 电池尺寸参数
         self.length, self.width, self.height = length, width, height
@@ -83,7 +93,7 @@ class SingleBattery:
         
         self.thermal_history = []  # 添加温度记录
         
-        self.last_step_heat = 0.0  # 记录上一步吸收的热量(J)  # TODO
+        self.last_step_heat = 0.0  # 记录上一步吸收的热量(J)  
     
     def reset(self):
         """重置电池状态"""
@@ -165,7 +175,7 @@ class SingleBattery:
         h = self.calculate_convective_coefficient(self.flow_rate)
 
         # 增强冷却效果的系数 - 适度增加
-        cooling_boost = 10.0
+        cooling_boost = self.cooling_boost
 
         # 1. 确定参与换热的层（底部层）
         bottom_layer_indices = (slice(1, self.grid_size_x+1), slice(1, self.grid_size_y+1), 1)
@@ -238,7 +248,7 @@ class SingleBattery:
         修改：减小 diffusion_factor 以增加温差
         """
         # 扩散因子 - 减小以增加电池内部垂直温差
-        diffusion_factor = 0.005
+        diffusion_factor = self.diffusion_factor
 
         T = self.temperature
         gx, gy, gz = self.grid_size_x, self.grid_size_y, self.grid_size_z

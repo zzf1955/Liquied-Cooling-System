@@ -163,5 +163,5 @@ class MultiBattery:
     
     def set_group_current(self, group_idx,current):
         start_idx = group_idx * self.num_batteries_per_group
-        for bettery_idx in range(start_idx,start_idx+self.num_batteries_per_group):
-            self.batteries[bettery_idx].current = current
+        for battery_idx in range(start_idx,start_idx+self.num_batteries_per_group):
+            self.batteries[battery_idx].current = current
