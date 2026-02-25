@@ -1,482 +1,605 @@
+"""
+多电池储能系统液冷热管理强化学习环境
+
+状态空间：每组电池 [顶部温度, 底部温度, 核心温度, 核心最大温度, 核心最小温度, 电压, 电流, 历史核心温度]
+动作空间：[冷却液入口温度, 冷却液流速]
+奖励函数：惩罚超温、组内/组间温差、控制成本
+"""
+
 import numpy as np
 from gymnasium import spaces
-from BatteryEnv.multi_battery_module import MultiBattery as MB
-from tianshou.env import SubprocVectorEnv, DummyVectorEnv
 import gymnasium as gym
+from tianshou.env import SubprocVectorEnv, DummyVectorEnv
 import os
 import pandas as pd
+from loguru import logger
+
 
 class MutiBatteryEnv(gym.Env):
-    def __init__(self, 
-                num_batteries_per_group=13, 
-                num_groups=4, 
-                max_steps=400, 
-                max_battery_tmp=313, 
-                min_battery_tmp=288,
-                env_temp=300, 
-                current_change_prob=0.05,
-                current_mu=30,
-                current_sigma=10,
-                current_clip_range=(0, 50),
-                flow_rate_range = (0, 3),
-                inlet_temp_range = (288, 295),
-                log_step = 100, # 增加步数，减少写入频率
-                log_path = "",
-                con = True,
-                ):
-        
+    """
+    多电池储能系统液冷热管理环境
+
+    状态空间 (每组8维):
+        - top_t: 顶部平均温度 (K)
+        - bottom_t: 底部平均温度 (K)
+        - core_t: 核心平均温度 (K)
+        - core_max_t: 核心最大温度 (K) [用于组内温差计算]
+        - core_min_t: 核心最小温度 (K) [用于组内温差计算]
+        - voltage: 总电压 (V)
+        - current: 电流 (A)
+        - last_core: 上一时刻核心温度 (K) [用于趋势]
+
+    动作空间 (2维):
+        - inlet_temp: 冷却液入口温度 (288-295 K, 即 15-22°C)
+        - flow_rate: 冷却液流速 (0-3 m/s)
+
+    奖励函数:
+        - 超温惩罚: 温度超过安全边界时惩罚
+        - 组内温差惩罚: 同一组内电芯温差
+        - 组间温差惩罚: 不同电池组之间的温差
+        - 控制成本: λ * flow_rate + μ * |Δinlet_temp|
+    """
+
+    def __init__(
+        self,
+        num_batteries_per_group: int = 13,
+        num_groups: int = 4,
+        max_steps: int = 400,
+        max_battery_tmp: float = 313.0,  # 40°C
+        min_battery_tmp: float = 288.0,  # 15°C
+        target_temp: float = 298.0,  # 25°C - 目标温度
+        env_temp: float = 300.0,  # 环境温度 27°C
+        current_mu: float = 30.0,  # 电流均值
+        current_sigma: float = 10.0,  # 电流标准差
+        current_clip_range: tuple = (0.0, 50.0),
+        flow_rate_range: tuple = (0.0, 3.0),
+        inlet_temp_range: tuple = (288.0, 295.0),  # 15-22°C
+        current_change_prob: float = 0.05,  # 电流重采样概率
+        lambda_cost: float = 0.5,  # 流速成本系数
+        mu_cost: float = 0.5,  # 入口温度平滑成本系数
+        log_step: int = 100,
+        log_path: str = "",
+        con: bool = True,
+        env_index: int = 0,
+        debug: bool = True,
+    ):
+        """
+        初始化多电池RL环境
+
+        Args:
+            num_batteries_per_group: 每组电池数量
+            num_groups: 电池组数量
+            max_steps: 每个episode最大步数
+            max_battery_tmp: 最大安全温度 (K)
+            min_battery_tmp: 最小安全温度 (K)
+            target_temp: 目标温度 (K)
+            env_temp: 环境温度 (K)
+            current_mu: 电流均值 (A)
+            current_sigma: 电流标准差 (A)
+            current_clip_range: 电流截断范围
+            flow_rate_range: 流速范围 (m/s)
+            inlet_temp_range: 入口温度范围 (K)
+            current_change_prob: 电流重采样概率
+            lambda_cost: 流速成本系数
+            mu_cost: 入口温度平滑成本系数
+            log_step: 日志保存间隔
+            log_path: 日志路径
+            con: 是否使用连续动作空间
+            env_index: 环境索引（多进程用）
+            debug: 是否开启调试输出
+        """
         super(MutiBatteryEnv, self).__init__()
-        
-        # 初始化多电池系统
-        self.battery_system = MB(num_batteries_per_group=num_batteries_per_group, 
-                                num_groups=num_groups,
-                                env_temp = env_temp)
-        
+
+        # 导入物理模型
+        from BatteryEnv.multi_battery_module import MultiBattery as MB
+
+        # 物理系统
+        self.battery_system = MB(
+            num_batteries_per_group=num_batteries_per_group,
+            num_groups=num_groups,
+            env_temp=env_temp,
+        )
+
+        # === 配置参数 ===
         self.num_batteries_per_group = num_batteries_per_group
         self.num_groups = num_groups
         self.total_batteries = num_batteries_per_group * num_groups
-        self.allrew = []
+        self.env_temp = env_temp
+        self.target_temp = target_temp
+        self.env_index = env_index
+        self.debug = debug
 
-        # 配置电压观测边界
-        single_voltage_range = (2.5, 3.65)
-        total_voltage_low = num_groups * num_batteries_per_group * single_voltage_range[0]
-        total_voltage_high = num_groups * num_batteries_per_group * single_voltage_range[1]
-
-        # 参数范围
-        self.inlet_temp_range = inlet_temp_range  # 温度范围 (K)
-        self.flow_rate_range = flow_rate_range  # 流速范围 (m/s)
+        # 温度边界
         self.max_battery_tmp = max_battery_tmp
         self.min_battery_tmp = min_battery_tmp
-        self.current_clip_range = current_clip_range  # 电流截断范围
 
-        if not con:
-            self.num_flow_actions = int(self.flow_rate_range[1] - self.flow_rate_range[0]) + 1
-            self.num_temp_actions = int(self.inlet_temp_range[1] - self.inlet_temp_range[0]) + 1
-            total_actions = self.num_flow_actions + self.num_temp_actions
-            self.action_space = spaces.Box(low=-np.inf, high=np.inf, shape=(total_actions,), dtype=np.float32)
-        else:
-            self.action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        # 动作范围
+        self.inlet_temp_range = inlet_temp_range  # (288, 295) K
+        self.flow_rate_range = flow_rate_range  # (0, 3) m/s
 
-        # 状态空间：每组8个值（当前核心/顶部/底部温度、电流、电压 + 历史核心/顶部/底部温度）
-        self.observation_space = spaces.Box(
-            low=np.array([0]*num_groups*6 + [current_clip_range[0]]*num_groups + [total_voltage_low]*num_groups, dtype=np.float32),
-            high=np.array([500]*num_groups*6 + [current_clip_range[1]]*num_groups + [total_voltage_high]*num_groups, dtype=np.float32),
-            dtype=np.float32
-        )
-        self.con = con
-
-        # 环境温度（室温）
-        self.environment_temp = env_temp  # 开尔文
-
-        # episode 参数
-        self.current_step = 0
-        self.max_steps = max_steps
-        self.num_groups = num_groups
-        
-        self.current_change_prob = current_change_prob  # 电流改变的概率
-
+        # 电流参数
         self.current_mu = current_mu
         self.current_sigma = current_sigma
+        self.current_clip_range = current_clip_range
+        self.current_change_prob = current_change_prob
 
-        self.flow_rate_action_log = []
-        self.intel_temp_action_log = []
-        self.core_temp_log = []
-        self.current_log = []
-        self.last_state = None  # 用于存储上一时刻的状态（温度趋势）
+        # 奖励函数系数
+        self.lambda_cost = lambda_cost
+        self.mu_cost = mu_cost
 
+        # === 动作空间 ===
+        # 连续模式: [-1, 1] -> 映射到实际范围
+        if con:
+            self.action_space = spaces.Box(
+                low=-1.0, high=1.0, shape=(2,), dtype=np.float32
+            )
+        else:
+            # 离散模式
+            self.num_flow_actions = int(flow_rate_range[1] - flow_rate_range[0]) + 1
+            self.num_temp_actions = int(inlet_temp_range[1] - inlet_temp_range[0]) + 1
+            self.action_space = spaces.Box(
+                low=-1.0,
+                high=1.0,
+                shape=(self.num_flow_actions + self.num_temp_actions,),
+                dtype=np.float32,
+            )
+
+        # === 状态空间 ===
+        # 每组8维: [top_t, bottom_t, core_t, core_max_t, core_min_t, voltage, current, last_core]
+        # 使用实际物理单位
+        obs_dim = num_groups * 8
+        self.observation_space = spaces.Box(
+            low=np.array([0.0] * obs_dim, dtype=np.float32),
+            high=np.array(
+                [500.0] * obs_dim, dtype=np.float32  # 温度/电压/电流统一上界
+            ),
+            dtype=np.float32,
+        )
+
+        self.con = con
+        self.current_step = 0
+        self.max_steps = max_steps
+
+        # === 状态跟踪 ===
+        self.last_action = None  # 上一步的动作 [inlet_temp, flow_rate]
+        self.last_core_temps = None  # 上一步每组的平均核心温度
+
+        # === 日志记录 ===
         self.episode_cnt = 0
         self.log_step = log_step
         self.log_path = log_path
+        self.reset_logs()
 
-        self.reset()
-        
+        # 调试日志
+        if self.debug:
+            logger.info(
+                f"[Env {env_index}] 初始化完成: {num_groups}组×{num_batteries_per_group}电池"
+            )
+            logger.info(
+                f"[Env {env_index}] 动作空间: inlet_temp={inlet_temp_range}K, flow_rate={flow_rate_range}m/s"
+            )
+            logger.info(
+                f"[Env {env_index}] 温度边界: [{min_battery_tmp}, {max_battery_tmp}]K"
+            )
+            logger.info(
+                f"[Env {env_index}] 状态空间: {num_groups}组 × 8维 = {obs_dim}维"
+            )
 
-    def step(self, action):
-        last_action = self.battery_system.batteries[0].get_action()
+    def reset_logs(self):
+        """重置日志数据"""
+        self.allrew = []
+        self.flow_rate_log = []
+        self.inlet_temp_log = []
+        self.core_temp_log = []  # 每步每组的平均核心温度
+        self.core_max_temp_log = []  # 每步每组的最大核心温度
+        self.core_min_temp_log = []  # 每步每组的最小核心温度
+        self.current_log = []
+        self.voltage_log = []
+        self.reward_breakdown_log = []  # 奖励分解
 
+    def _get_obs(self) -> np.ndarray:
+        """
+        获取当前观测状态
+
+        Returns:
+            np.ndarray: 状态数组，形状 (num_groups * 8,)
+                每组: [top_t, bottom_t, core_t, core_max_t, core_min_t, voltage, current, last_core]
+        """
+        obs = []
+
+        for i in range(self.num_groups):
+            # 获取该组的统计信息
+            stats = self.battery_system.get_group_stats(i)
+
+            # 获取组内所有电芯的核心温度（用于计算组内温差）
+            start_idx = i * self.num_batteries_per_group
+            end_idx = start_idx + self.num_batteries_per_group
+            group_temps = [
+                b.get_core_temperature()
+                for b in self.battery_system.batteries[start_idx:end_idx]
+            ]
+
+            # 实际温度值
+            top_t = stats["avg_top"]
+            bottom_t = stats["avg_bot"]
+            core_t = stats["avg_core"]
+            core_max_t = max(group_temps)  # 核心最大温度
+            core_min_t = min(group_temps)  # 核心最小温度
+            voltage = stats["total_voltage"]
+            current = stats["current"]
+
+            # 历史核心温度（趋势）
+            if self.last_core_temps is not None:
+                last_core = self.last_core_temps[i]
+            else:
+                last_core = core_t  # 初始时刻
+
+            obs.extend([top_t, bottom_t, core_t, core_max_t, core_min_t, voltage, current, last_core])
+
+        return np.array(obs, dtype=np.float32)
+
+    def step(self, action: np.ndarray):
+        """
+        执行一步环境交互
+
+        Args:
+            action: 动作数组，形状 (2,) 或 (n_actions,)
+
+        Returns:
+            obs: 新状态
+            reward: 奖励
+            done: 是否终止
+            truncated: 是否截断
+            info: 额外信息
+        """
+        # === 1. 动作解析 ===
         if not self.con:
-            expected_shape = (self.num_flow_actions + self.num_temp_actions,)
-            assert action.shape == expected_shape, f"Expected action shape {expected_shape}, but got {action.shape}"
-
-            # 分割 action 向量
-            action_flow = action[:self.num_flow_actions]
-            action_temp = action[self.num_flow_actions:]
-
-            # 使用 argmax 选择动作索引 (对应于 "选最大下标")
-            flow_rate_index = np.argmax(action_flow)
-            inlet_temp_index = np.argmax(action_temp)
-
-            # 根据索引和范围计算实际的 flow_rate 和 inlet_temp
-            # 假设范围内的值是连续整数，步长为 1
-            flow_rate = self.flow_rate_range[0] + flow_rate_index
-            inlet_temp = self.inlet_temp_range[0] + inlet_temp_index
+            # 离散动作
+            flow_rate = self.flow_rate_range[0] + np.argmax(
+                action[: self.num_flow_actions]
+            )
+            inlet_temp = self.inlet_temp_range[0] + np.argmax(
+                action[self.num_flow_actions :]
+            )
         else:
+            # 连续动作: action[0] -> inlet_temp, action[1] -> flow_rate
+            # 先裁剪到 [-1, 1] 范围
+            action = np.clip(action, -1.0, 1.0)
             inlet_temp = self._map_to_range(action[0], self.inlet_temp_range)
             flow_rate = self._map_to_range(action[1], self.flow_rate_range)
 
-        # if self.battery_system.batteries[0].current == self.current_mu:
-        #     flow_rate  = 6 * np.random.rand()
-        #     inlet_temp = 280 + np.random.rand() * np.random.rand() * 30
-        # else:
-        #     flow_rate  = 6 * np.random.rand() * np.random.rand()
-        #     inlet_temp = self.environment_temp-20+ np.random.rand() * np.random.rand() * 20
+        # 记录当前动作
+        current_action = [inlet_temp, flow_rate]
 
-        action = np.array([flow_rate,inlet_temp],dtype=np.float32)
+        # === 2. 应用控制 ===
+        self.battery_system.set_group_controls(flow_rate, inlet_temp)
 
-        # 设置所有电池的流速相同（由控制器统一控制）
-        # 只设置第一个电池的入口温度，后续电池的入口温度由冷却液流动物理决定
-        for battery in self.battery_system.batteries:
-            battery.flow_rate = flow_rate
-        # 第一个电池的入口温度由控制器设置
-        self.battery_system.batteries[0].inlet_temp = inlet_temp
+        # === 3. 电流随机变化 ===
+        # 每步有小概率重新采样电流（模拟负载变化）
+        if self.np_random.random() <= self.current_change_prob:
+            # 正态分布采样电流
+            new_current = self.np_random.normal(self.current_mu, self.current_sigma)
+            new_current = np.clip(new_current, *self.current_clip_range)
 
-        self.flow_rate_action_log.append(flow_rate)
-        self.intel_temp_action_log.append(inlet_temp)
+            # 统一设置所有组的电流
+            for i in range(self.num_groups):
+                self.battery_system.set_group_current(i, new_current)
 
-        current_log_ = []
-        for group_index in range(self.num_groups):
-            if self.np_random.random()<=self.current_change_prob:
-                if self.battery_system.get_group_stats(group_idx=group_index)['current'] == 0:
-                    self.battery_system.set_group_current(group_idx=group_index,current=self.current_mu)
-                else:
-                    self.battery_system.set_group_current(group_idx=group_index,current=0)
-            current_log_.append(self.battery_system.get_group_stats(group_idx=group_index)['current'])
-        self.current_log.append(current_log_)
+            if self.debug:
+                logger.debug(
+                    f"[Env {self.env_index}] 电流重采样: {new_current:.2f}A"
+                )
 
-        # 保存当前状态作为历史状态（在运行电池系统之前）
-        current_state = self._get_state()
-
-        # 运行电池系统
+        # === 4. 物理模拟 ===
         self.battery_system.run(t_seconds=5)
 
-        # 保存当前状态为历史状态，然后获取新状态
-        self.last_state = current_state.copy()
-        state = self._get_state()
+        # === 5. 获取新状态 ===
+        obs = self._get_obs()
 
-        # 计算奖励
-        reward = self._calculate_reward(state, action, last_action)
-
-        # 更新计步器
-        self.current_step += 1
-
-        # 判断终止条件：任意电池组的平均核心温度超过阈值
-        done = False
+        # 保存当前核心温度作为历史
+        current_core_temps = []
         for i in range(self.num_groups):
-            group_core_temp = state[i * 8]  # 每组的平均核心温度
+            idx = i * 8 + 2  # core_t 的位置
+            current_core_temps.append(obs[idx])
+        self.last_core_temps = current_core_temps
 
-            # 温度终止条件
-            if group_core_temp > self.max_battery_tmp or group_core_temp < self.min_battery_tmp:
-                done = True
-                break
-
-        # 判断截断条件：步数超过max_steps
-        truncated = bool(self.current_step >= self.max_steps)
-
-        # 添加调试信息
-        info = {
-            'reward': reward,
-            'group_temps': [state[i * 8] for i in range(self.num_groups)],
-            'group_voltages': [state[i * 8 + 4] for i in range(self.num_groups)],
-            'actions': action
-        }
-        self.allrew.append(reward)
-        return state, reward, done, truncated, info
-
-    def _get_state(self):
-        """获取环境的当前状态（包含温度趋势）"""
-        state = []
-        global_current = self.battery_system.batteries[0].current  # 所有电池电流相同
-
-        # 获取每个组的平均状态
-        for group_idx in range(self.num_groups):
-            start_idx = group_idx * self.num_batteries_per_group
-            end_idx = start_idx + self.num_batteries_per_group
-            group_batteries = self.battery_system.batteries[start_idx:end_idx]
-
-            # 计算组内平均值
-            avg_core_temp = sum(b.get_core_temperature() for b in group_batteries) / len(group_batteries)
-            avg_top_temp = sum(b.get_top_surface_average_temperature() for b in group_batteries) / len(group_batteries)
-            avg_bottom_temp = sum(b.get_bottom_surface_average_temperature() for b in group_batteries) / len(group_batteries)
-            total_voltage = sum(b.get_voltage() for b in group_batteries)
-
-            # 当前状态
-            state.extend([avg_core_temp, avg_top_temp, avg_bottom_temp, global_current, total_voltage])
-
-            # 历史状态（上一时刻的温度）
-            if self.last_state is not None:
-                # 提取上一时刻对应组的温度
-                last_core_temp = self.last_state[group_idx * 8]
-                last_top_temp = self.last_state[group_idx * 8 + 1]
-                last_bottom_temp = self.last_state[group_idx * 8 + 2]
-            else:
-                # 初始时刻，使用当前温度作为历史
-                last_core_temp = avg_core_temp
-                last_top_temp = avg_top_temp
-                last_bottom_temp = avg_bottom_temp
-
-            state.extend([last_core_temp, last_top_temp, last_bottom_temp])
-
-        return np.array(state, dtype=np.float32)
-
-    def _calculate_reward(self, state, action, last_action):
-        """计算奖励函数
-
-        奖励包含：
-        1. 温度超限惩罚：核心温度超过目标温度时惩罚
-        2. 组间温差惩罚：不同电池组之间的温差惩罚
-        3. 控制平滑度惩罚：动作变化的惩罚
-        4. 能耗惩罚：流速越高，能耗越大
-        """
-        target_temp = 298  # K (25°C) - 目标核心温度
-
-        flow_rate, inlet_temp = action[0], action[1]
-
-        # 1. 温度超限惩罚
-        temp_penalty = 0
-        core_temps = []
-        for i in range(self.num_groups):
-            core_temp = state[i * 8]  # 当前组的平均核心温度
-            core_temps.append(core_temp)
-
-            if core_temp > target_temp:
-                temp_penalty += (core_temp - target_temp) * 0.1  # 超温惩罚
-
-        # 2. 组间温差惩罚（系统温差惩罚）
-        if len(core_temps) > 1:
-            temp_spread = max(core_temps) - min(core_temps)
-            delta_penalty = temp_spread * 0.5
-        else:
-            delta_penalty = 0
-
-        # 3. 控制平滑度惩罚（基于实际动作变化）
-        # last_action 是电池的 get_action() 返回值 [inlet_temp, flow_rate]
-        if last_action is not None and len(last_action) >= 2:
-            last_flow_rate = last_action[1] if last_action[1] is not None else flow_rate
-            last_inlet_temp = last_action[0] if last_action[0] is not None else inlet_temp
-        else:
-            last_flow_rate = flow_rate
-            last_inlet_temp = inlet_temp
-
-        smooth_penalty = (
-            abs(flow_rate - last_flow_rate) * 0.1 +
-            abs(inlet_temp - last_inlet_temp) * 0.05
+        # === 6. 计算奖励 ===
+        reward, reward_breakdown = self._calculate_reward(
+            obs, current_action, self.last_action
         )
 
-        # 4. 能耗惩罚（流速越高，能耗越大）
-        energy_penalty = flow_rate * 0.05
+        # === 7. 终止条件 ===
+        self.current_step += 1
+        done = False
+        truncated = False
 
-        # 基础奖励：温度越接近目标越好
-        base_reward = 1.0 - abs(core_temps[0] - target_temp) / 10.0
-        base_reward = max(base_reward, -1.0)
+        # 温度超限检测
+        for i in range(self.num_groups):
+            core_t = obs[i * 8 + 2]  # core_t
+            if core_t > self.max_battery_tmp or core_t < self.min_battery_tmp:
+                done = True
+                reward -= 50.0  # 额外惩罚
+                if self.debug:
+                    logger.warning(
+                        f"[Env {self.env_index}] 温度超限! 组{i}: {core_t:.2f}K"
+                    )
+                break
 
-        # 总奖励
-        reward = base_reward - temp_penalty - delta_penalty - smooth_penalty - energy_penalty
+        # 步数截断
+        if self.current_step >= self.max_steps:
+            truncated = True
 
-        self.core_temp_log.append(core_temps)
-        return reward
+        # === 8. 记录日志 ===
+        self.allrew.append(reward)
+        self.flow_rate_log.append(flow_rate)
+        self.inlet_temp_log.append(inlet_temp)
+        self.core_temp_log.append(
+            [obs[i * 8 + 2] for i in range(self.num_groups)]
+        )
+        self.core_max_temp_log.append(
+            [obs[i * 8 + 3] for i in range(self.num_groups)]
+        )
+        self.core_min_temp_log.append(
+            [obs[i * 8 + 4] for i in range(self.num_groups)]
+        )
+        self.current_log.append(
+            [self.battery_system.get_group_stats(i)["current"] for i in range(self.num_groups)]
+        )
+        self.voltage_log.append(
+            [self.battery_system.get_group_stats(i)["total_voltage"] for i in range(self.num_groups)]
+        )
+        self.reward_breakdown_log.append(reward_breakdown)
 
-    def reset(self, seed=233, randomize_init_current=False):
-        # 记录有效episode
-        if self.allrew:
-            self.episode_cnt+=1
-            if self.episode_cnt % self.log_step == 0:
-                # 确保日志目录存在
-                if self.log_path and not os.path.exists(self.log_path):
-                    os.makedirs(self.log_path)
+        # 保存动作供下一步使用
+        self.last_action = current_action
 
-                # 构建日志文件名
-                log_file_path = os.path.join(self.log_path, f"log_{self.episode_cnt}.csv")
+        # 调试输出
+        if self.debug and self.current_step % 50 == 0:
+            logger.debug(
+                f"[Env {self.env_index}] Step {self.current_step}: "
+                f"core_t={obs[2]:.2f}K, reward={reward:.2f}, "
+                f"action=[inlet={inlet_temp:.2f}K, flow={flow_rate:.2f}m/s]"
+            )
 
-                # 检查列表长度是否一致，如果不一致可能需要调整数据准备逻辑
-                if not (len(self.allrew) == len(self.flow_rate_action_log) == len(self.intel_temp_action_log) == len(self.core_temp_log) == len(self.current_log)):
-                    print(f"Warning: Log data lists have different lengths at episode {self.episode_cnt}. Skipping log generation for this episode.")
-                    raise RuntimeError("Log data lists have different lengths")
-                else:
-                    # 准备数据写入 DataFrame
-                    log_data = {
-                        'reward': self.allrew,
-                        'flow_rate_action': self.flow_rate_action_log,
-                        'inlet_temp_action': self.intel_temp_action_log
-                    }
+        info = {
+            "reward": reward,
+            "reward_breakdown": reward_breakdown,
+            "group_temps": [obs[i * 8 + 2] for i in range(self.num_groups)],
+            "group_temps_max": [obs[i * 8 + 3] for i in range(self.num_groups)],
+            "group_temps_min": [obs[i * 8 + 4] for i in range(self.num_groups)],
+            "actions": current_action,
+        }
 
-                    # 为每个组的 current 和 core_temp 创建单独的列
-                    for i in range(self.num_groups):
-                        # 提取第 i 组的所有时间步的 current 值
-                        log_data[f'current_group_{i}'] = [step_currents[i] for step_currents in self.current_log]
-                        # 提取第 i 组的所有时间步的 core_temp 值
-                        log_data[f'core_temp_group_{i}'] = [step_temps[i] for step_temps in self.core_temp_log]
+        return obs, reward, done, truncated, info
 
-                    try:
-                        df = pd.DataFrame(log_data)
-                        df.to_csv(log_file_path, index=False)
-                        print(f"Log saved to {log_file_path}")
-                    except Exception as e:
-                        print(f"Error writing log file {log_file_path}: {e}")
+    def _calculate_reward(
+        self, obs: np.ndarray, current_action: list, last_action: list
+    ) -> tuple:
+        """
+        计算奖励函数
 
-        self.allrew = []
-        self.flow_rate_action_log = []
-        self.intel_temp_action_log = []
-        self.core_temp_log = []
-        self.current_log = []
-        self.last_state = None  # 重置历史状态
+        奖励组成:
+            1. 温度偏差惩罚: 偏离目标温度的平方
+            2. 温度达标奖励: 温度在目标范围内时获得正奖励
+            3. 组间温差惩罚: 不同组之间的温差
+            4. 控制成本: λ * flow_rate + μ * |Δinlet_temp|
 
+        Args:
+            obs: 当前观测
+            current_action: 当前动作 [inlet_temp, flow_rate]
+            last_action: 上一步动作
+
+        Returns:
+            total_reward: 总奖励
+            breakdown: 奖励分解字典
+        """
+        inlet_temp, flow_rate = current_action
+        target_temp = self.target_temp
+
+        # 初始化奖励分解
+        breakdown = {
+            "temp_penalty": 0.0,
+            "temp_reward": 0.0,
+            "inter_group_temp_diff_penalty": 0.0,
+            "control_cost": 0.0,
+            "total": 0.0,
+        }
+
+        total_reward = 0.0
+
+        # === 1. 温度偏差惩罚 ===
+        for i in range(self.num_groups):
+            core_t = obs[i * 8 + 2]  # 核心平均温度
+            dist = abs(core_t - target_temp)
+            temp_penalty = 0.5 * (dist ** 2)  # 平方惩罚
+            total_reward -= temp_penalty
+            breakdown["temp_penalty"] -= temp_penalty
+
+        # === 2. 温度达标奖励 (新增) ===
+        # 当温度在目标范围附近时给予正奖励，让训练更容易收敛
+        temp_tolerance = 5.0  # 温度容差范围 ±5K
+        for i in range(self.num_groups):
+            core_t = obs[i * 8 + 2]
+            if abs(core_t - target_temp) < temp_tolerance:
+                # 温度越接近目标，奖励越高
+                reward_factor = 1.0 - abs(core_t - target_temp) / temp_tolerance
+                temp_reward = 10.0 * reward_factor  # 最高10分
+                total_reward += temp_reward
+                breakdown["temp_reward"] += temp_reward
+
+        # === 3. 组间温差惩罚 ===
+        if self.num_groups > 1:
+            group_avg_temps = [obs[i * 8 + 2] for i in range(self.num_groups)]
+            inter_diff = max(group_avg_temps) - min(group_avg_temps)
+            total_reward -= 1.5 * inter_diff  # 组间温差系数
+            breakdown["inter_group_temp_diff_penalty"] -= 1.5 * inter_diff
+
+        # === 4. 控制成本 ===
+        # cost = λ * R_flow + μ * |T_inlet(t) - T_inlet(t-1)|
+        flow_cost = self.lambda_cost * flow_rate
+        smooth_cost = 0.0
+        if last_action is not None:
+            smooth_cost = self.mu_cost * abs(inlet_temp - last_action[0])
+
+        total_reward -= flow_cost + smooth_cost
+        breakdown["control_cost"] = -(flow_cost + smooth_cost)
+
+        breakdown["total"] = total_reward
+        return total_reward, breakdown
+
+    def reset(self, seed: int = None, options: dict = None):
+        """
+        重置环境
+
+        Args:
+            seed: 随机种子
+            options: 额外选项
+
+        Returns:
+            obs: 初始观测
+            info: 额外信息
+        """
+        # 保存日志
+        if self.allrew and self.log_path and self.episode_cnt % self.log_step == 0:
+            self._save_csv_log()
+
+        self.episode_cnt += 1
+
+        # 调用父类reset（设置随机种子）
         super().reset(seed=seed)
 
-        # 重置所有电池的状态
-        for battery in self.battery_system.batteries:
-            battery.inlet_temp = self.environment_temp
-            battery.flow_rate = 0  # 初始化流速为默认值
-
-            if randomize_init_current:
-                current = self.np_random.normal(self.current_mu, self.current_sigma)
-                current = np.clip(current, *self.current_clip_range)
-                for battery in self.battery_system.batteries:
-                    battery.current = current
-            else:
-                for battery in self.battery_system.batteries:
-                    battery.current = 0
-
-        self.current_step = 0
+        # 重置物理系统
         self.battery_system.reset()
 
-        # 获取初始状态
-        initial_state = self._get_state()
-        
-        # 添加调试信息
-        info = {}
-        return initial_state, info
+        # 重置状态
+        self.current_step = 0
+        self.last_action = None
+        self.last_core_temps = None
+        self.reset_logs()
 
-    def render(self):
-        """输出每个组的状态信息"""
-        # 输出每个组的平均值
-        for group_idx in range(self.num_groups):
-            # 计算范围
-            start_idx = group_idx * self.num_batteries_per_group
-            end_idx = start_idx + self.num_batteries_per_group
-            group_batteries = self.battery_system.batteries[start_idx:end_idx]
-            
-            # 计算组内平均值
-            avg_core_temp = sum(b.get_core_temperature() for b in group_batteries) / len(group_batteries)
-            avg_top_temp = sum(b.get_top_surface_average_temperature() for b in group_batteries) / len(group_batteries)
-            avg_bottom_temp = sum(b.get_bottom_surface_average_temperature() for b in group_batteries) / len(group_batteries)
-            current = self.battery_system.get_group_stats(group_idx)['current']
-            total_voltage = sum(b.get_voltage() for b in group_batteries)
-            
-            # 获取第一个电池的冷却参数作为组的代表
-            inlet_temp, flow_rate = group_batteries[0].get_action()
-            
-            print(f"Group {group_idx+1} - Avg Core Temp: {avg_core_temp:.2f} K, "
-                  f"Top Temp: {avg_top_temp:.2f} K, Bottom Temp: {avg_bottom_temp:.2f} K, "
-                  f"Current: {current:.2f} A, Total Voltage: {total_voltage:.2f} V, "
-                  f"Action: [Inlet Temp: {inlet_temp:.2f} K, Flow Rate: {flow_rate:.2f} m/s]")
-            
-            # 可选：显示组内的一些电池
-            if group_idx == 0:  # 只对第一组详细显示
-                for i in range(start_idx, start_idx + min(3, self.num_batteries_per_group)):
-                    battery = self.battery_system.batteries[i]
-                    core_temp = battery.get_core_temperature()
-                    print(f"  - Battery {i}: Core Temp: {core_temp:.2f} K")
+        # 获取初始观测
+        obs = self._get_obs()
 
-    def _map_to_range(self, value, value_range):
-        """将标准化的[-1, 1]值映射到给定的实际范围"""
-        min_val, max_val = value_range
+        # 初始化历史温度
+        self.last_core_temps = [obs[i * 8 + 2] for i in range(self.num_groups)]
+
+        if self.debug:
+            logger.info(
+                f"[Env {self.env_index}] Episode {self.episode_cnt} 开始: 初始温度={obs[2]:.2f}K"
+            )
+
+        return obs, {}
+
+    def _save_csv_log(self):
+        """保存CSV日志"""
+        if not self.log_path:
+            return
+
+        os.makedirs(self.log_path, exist_ok=True)
+        log_file = os.path.join(
+            self.log_path, f"env_{self.env_index}_ep_{self.episode_cnt}.csv"
+        )
+
+        try:
+            data = {
+                "step": list(range(len(self.allrew))),
+                "reward": self.allrew,
+                "flow_rate": self.flow_rate_log,
+                "inlet_temp": self.inlet_temp_log,
+            }
+
+            # 每组的数据
+            for i in range(self.num_groups):
+                data[f"core_temp_g{i}"] = [t[i] for t in self.core_temp_log]
+                data[f"core_max_temp_g{i}"] = [t[i] for t in self.core_max_temp_log]
+                data[f"core_min_temp_g{i}"] = [t[i] for t in self.core_min_temp_log]
+                data[f"current_g{i}"] = [c[i] for c in self.current_log]
+
+            df = pd.DataFrame(data)
+            df.to_csv(log_file, index=False)
+
+            if self.debug:
+                logger.info(f"[Env {self.env_index}] 日志保存: {log_file}")
+
+        except Exception as e:
+            logger.error(f"[Env {self.env_index}] 日志保存失败: {e}")
+
+    def _map_to_range(self, value: float, val_range: tuple) -> float:
+        """
+        将标准化值 [-1, 1] 映射到实际范围
+
+        Args:
+            value: 标准化值
+            val_range: 目标范围 (min, max)
+
+        Returns:
+            实际值
+        """
+        min_val, max_val = val_range
         return (value + 1) * 0.5 * (max_val - min_val) + min_val
 
-    def _map_from_range(self, value, value_range):
-        """将实际的值从给定的范围映射回标准化的[-1, 1]"""
-        min_val, max_val = value_range
+    def _map_from_range(self, value: float, val_range: tuple) -> float:
+        """
+        将实际值映射到标准化范围 [-1, 1]
+
+        Args:
+            value: 实际值
+            val_range: 实际范围 (min, max)
+
+        Returns:
+            标准化值
+        """
+        min_val, max_val = val_range
         return 2 * (value - min_val) / (max_val - min_val) - 1
 
-def test_muti_battery_env():
-    # 创建环境：4组，每组13个电池
-    env = MutiBatteryEnv(num_batteries_per_group=13, num_groups=4, 
-                         max_steps=512, max_current=10, min_current=0, 
-                         env_temp=298, change_steps=128)
-    
-    initial_state, _ = env.reset(randomize_init_current=False)
-    
-    print("Initial State:")
-    env.render()  # 显示初始状态
+    def render(self, mode: str = "human"):
+        """渲染环境状态"""
+        print(f"\n=== Episode {self.episode_cnt}, Step {self.current_step} ===")
 
-    # 动作：使用当前环境设置的动作参数
-    actions = []
-    for group_idx in range(env.num_groups):
-        # 获取该组第一个电池的动作作为组的代表
-        start_idx = group_idx * env.num_batteries_per_group
-        inlet_temp, flow_rate = env.battery_system.batteries[start_idx].get_action()
-        
-        # 将实际温度和流速映射回 [-1, 1] 的动作空间
-        norm_inlet_temp = env._map_from_range(inlet_temp, env.inlet_temp_range)
-        norm_flow_rate = env._map_from_range(flow_rate, env.flow_rate_range)
-        actions.append([norm_inlet_temp, norm_flow_rate])
+        for i in range(self.num_groups):
+            stats = self.battery_system.get_group_stats(i)
+            # 获取组内温差
+            start_idx = i * self.num_batteries_per_group
+            end_idx = start_idx + self.num_batteries_per_group
+            group_temps = [
+                b.get_core_temperature()
+                for b in self.battery_system.batteries[start_idx:end_idx]
+            ]
+            temp_diff = max(group_temps) - min(group_temps)
 
-    steps = 999999  # 运行多少次迭代
-    for step in range(steps):
-        print(f"\n--- Step {step + 1} ---")
+            print(
+                f"Group {i}: "
+                f"Core={stats['avg_core']:.2f}K (Δ={temp_diff:.2f}K), "
+                f"Top={stats['avg_top']:.2f}K, "
+                f"Bottom={stats['avg_bot']:.2f}K, "
+                f"V={stats['total_voltage']:.2f}V, "
+                f"I={stats['current']:.2f}A"
+            )
 
-        actions = np.array(actions, dtype=np.float32)
+        if self.last_action:
+            print(
+                f"Action: inlet_temp={self.last_action[0]:.2f}K, flow_rate={self.last_action[1]:.2f}m/s"
+            )
 
-        # 运行模拟
-        state, reward, terminated, truncated, info = env.step(actions)
+        if self.allrew:
+            print(f"Reward: {self.allrew[-1]:.4f}")
 
-        # 显示当前状态和动作
-        env.render()
-        print(f"Reward: {reward:.4f}")
 
-        # 检查是否终止
-        if terminated or truncated:
-            print("Environment reached terminal state.")
-            break
-
-        # 等待用户输入
-        user_input = input("Press Enter to continue, or 'b' to modify actions and currents: ").strip()
-
-        if user_input.lower() == 'b':
-            for group_idx in range(env.num_groups):
-                try:
-                    print(f"--- Group {group_idx+1} ---")
-                    inlet_temp = float(input(f"Enter inlet cooling temperature for Group {group_idx+1} (K): "))
-                    flow_rate = float(input(f"Enter cooling flow rate for Group {group_idx+1} (m/s): "))
-                    current = float(input(f"Enter output current for Group {group_idx+1} (A): "))
-
-                    # 映射到动作空间
-                    norm_inlet_temp = env._map_from_range(inlet_temp, env.inlet_temp_range)
-                    norm_flow_rate = env._map_from_range(flow_rate, env.flow_rate_range)
-
-                    real_inlet_temp = env._map_to_range(norm_inlet_temp,env.inlet_temp_range)
-                    real_flow_rate = env._map_to_range(norm_flow_rate, env.flow_rate_range)
-                    
-                    # 更新动作
-                    actions[group_idx] = [norm_inlet_temp, norm_flow_rate]
-                    
-                    # 更新电池组的电流
-                    start_idx = group_idx * env.num_batteries_per_group
-                    end_idx = start_idx + env.num_batteries_per_group
-                    for i in range(start_idx, end_idx):
-                        env.battery_system.batteries[i].current = current
-
-                except ValueError:
-                    print("Invalid input, using previous values.")
-        
-        if user_input == "stop":
-            break
-        elif user_input == '':
-            continue
-
-    print("Test completed.")
-
-def make_env(num_batteries_per_group=13,
-            num_groups=4,
-            episode_steps=512,
-            log_path="",
-            con=True,
-            num_train_envs=8,
-            num_test_envs=4,
-            use_subproc=True):
+def make_env(
+    num_batteries_per_group: int = 13,
+    num_groups: int = 4,
+    episode_steps: int = 512,
+    log_path: str = "",
+    con: bool = True,
+    num_train_envs: int = 8,
+    num_test_envs: int = 4,
+    use_subproc: bool = True,
+    debug: bool = False,
+):
     """
     创建向量化环境，支持多进程并行训练
 
-    参数:
+    Args:
         num_batteries_per_group: 每组电池数量
         num_groups: 电池组数量
         episode_steps: 每个episode的最大步数
@@ -484,44 +607,64 @@ def make_env(num_batteries_per_group=13,
         con: 是否使用连续动作空间
         num_train_envs: 训练环境数量
         num_test_envs: 测试环境数量
-        use_subproc: 是否使用SubprocVectorEnv（True使用多进程，False使用DummyVectorEnv）
+        use_subproc: 是否使用SubprocVectorEnv
+        debug: 是否开启调试输出
+
+    Returns:
+        main_env: 主环境实例（用于获取配置）
+        train_envs: 训练用向量化环境
+        test_envs: 测试用向量化环境
     """
 
-    def _select_env(evaluate=False, seed=None):
+    def _select_env(evaluate: bool = False, env_idx: int = 0, seed: int = None):
         """创建独立的环境实例"""
-        env = MutiBatteryEnv(num_batteries_per_group=num_batteries_per_group,
-                            num_groups=num_groups,
-                            max_steps=episode_steps,
-                            log_path=log_path,
-                            con=con)
+        env = MutiBatteryEnv(
+            num_batteries_per_group=num_batteries_per_group,
+            num_groups=num_groups,
+            max_steps=episode_steps,
+            log_path=log_path,
+            con=con,
+            env_index=env_idx,
+            debug=debug,
+        )
         if seed is not None:
             env.reset(seed=seed)
         return env
 
-    # 根据是否使用子进程选择向量化环境类型
+    # 创建向量化环境
     if use_subproc and num_train_envs > 1:
-        # 使用SubprocVectorEnv进行多进程并行
+        # 使用多进程
         train_envs = SubprocVectorEnv(
-            [lambda: _select_env(seed=i) for i in range(num_train_envs)],
+            [lambda i=i: _select_env(env_idx=i, seed=i) for i in range(num_train_envs)],
             wait_num=num_train_envs // 2,
-            timeout=0.1
+            timeout=0.1,
         )
         test_envs = SubprocVectorEnv(
-            [lambda: _select_env(seed=num_train_envs + i) for i in range(num_test_envs)],
+            [
+                lambda i=i: _select_env(env_idx=num_train_envs + i, seed=num_train_envs + i)
+                for i in range(num_test_envs)
+            ],
             wait_num=num_test_envs // 2,
-            timeout=0.1
+            timeout=0.1,
         )
     else:
-        # 使用DummyVectorEnv作为后备
+        # 使用单进程
         train_envs = DummyVectorEnv(
-            [lambda: _select_env(seed=i) for i in range(max(1, num_train_envs))]
+            [lambda i=i: _select_env(env_idx=i, seed=i) for i in range(max(1, num_train_envs))]
         )
         test_envs = DummyVectorEnv(
-            [lambda: _select_env(seed=num_train_envs + i) for i in range(max(1, num_test_envs))]
+            [
+                lambda i=i: _select_env(env_idx=num_train_envs + i, seed=num_train_envs + i)
+                for i in range(max(1, num_test_envs))
+            ]
         )
 
-    # 创建一个主环境实例用于获取配置信息
-    main_env = _select_env()
+    # 主环境实例
+    main_env = _select_env(env_idx=0, seed=0)
+
+    logger.info(
+        f"环境创建完成: {num_groups}组×{num_batteries_per_group}电池, "
+        f"训练环境={num_train_envs}, 测试环境={num_test_envs}"
+    )
 
     return main_env, train_envs, test_envs
-
