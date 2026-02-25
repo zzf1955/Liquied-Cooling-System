@@ -10,7 +10,9 @@ dependencies = [
     "numpy>=2.0.2",
     "pandas>=2.3.3",
     "pytest>=8.4.2",
-    # "tianshou>=0.5.1",
+    "gymnasium>=0.29.0",
+    "tianshou>=0.5.1",
+    "torch>=2.0.0",
 ]
 
 [[tool.uv.index]]

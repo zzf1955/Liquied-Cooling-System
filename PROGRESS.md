@@ -604,3 +604,66 @@ self.battery_system.batteries[0].inlet_temp = inlet_temp
 1. **温差来源**：低流速时冷却液温升更大，组间温差更明显
 2. **参数敏感性**：cooling_boost过大会导致数值不稳定(50时出现60000+K温升)
 3. **物理真实性**：液冷入口温度应在15-22°C范围，符合实际工况
+
+---
+
+## 2025-02-25: 多电池RL环境重构
+
+### 背景
+用户需要准备RL训练环境，发现 `multi_battery_env` 和 `multi_battery_env_con` 存在以下问题：
+1. 动作空间范围不符合要求（流速应为0-3，冷却液温度15-22°C）
+2. 奖励函数设计不够完善
+3. 状态缺少温度趋势信息
+4. multi_battery_env_con.py 存在硬编码调试逻辑
+
+### 遇到的问题及解决方案
+
+#### 问题1: 导入错误 - 类名不一致
+- **现象**: `ImportError: cannot import name 'MutiBattery'`
+- **原因**: multi_battery_module.py 中的类名是 `MultiBattery`，但环境文件中导入为 `MutiBattery`
+- **解决**: 修改导入语句为 `from BatteryEnv.multi_battery_module import MultiBattery as MB`
+
+#### 问题2: 方法名不一致
+- **现象**: `AttributeError: 'MultiBattery' object has no attribute 'get_group_current'`
+- **原因**: 环境中调用了不存在的方法 `get_group_current`，实际方法名为 `get_group_stats`
+- **解决**: 修改所有调用为 `get_group_stats(group_idx)['current']`
+
+#### 问题3: 缺少属性初始化
+- **现象**: `AttributeError: 'MutiBatteryEnv' object has no attribute 'current_clip_range'`
+- **原因**: 在 __init__ 中没有将参数保存为实例变量
+- **解决**: 添加 `self.current_clip_range = current_clip_range`
+
+### 修改内容
+
+| 文件 | 修改 |
+|------|------|
+| multi_battery_env.py | 流速范围改为(0,3)，状态加入温度趋势(20维→32维)，奖励函数重写 |
+| multi_battery_env_con.py | 修复硬编码调试逻辑，统一参数范围，状态和奖励函数同步修改 |
+| pyproject.toml | 添加 gymnasium, tianshou, torch 依赖 |
+
+### 奖励函数设计
+```python
+reward = base_reward - temp_penalty - delta_penalty - smooth_penalty - energy_penalty
+```
+- **base_reward**: 温度越接近目标(298K)越好
+- **temp_penalty**: 核心温度超过298K时惩罚
+- **delta_penalty**: 组间温差惩罚
+- **smooth_penalty**: 控制平滑度惩罚(动作变化)
+- **energy_penalty**: 能耗惩罚(流速越高惩罚越大)
+
+### 测试验证
+- ✓ 环境创建成功
+- ✓ 动作空间: Box(-1.0, 1.0, (2,), float32)
+- ✓ 状态空间维度: 32
+- ✓ 流速范围: (0, 3)
+- ✓ 入口温度范围: (288, 295)
+- ✓ step 运行正常，奖励计算正确
+
+### git commit
+- 分支：`refactor/multi-battery-env`
+- 待合并到 `fix/cooling-physics`
+
+### 经验总结
+1. **命名一致性**：确保导入的类名与方法名与实际定义一致
+2. **属性初始化**：所有 __init__ 参数都应保存为实例变量
+3. **RL环境设计**：奖励函数需要综合考虑多个目标（温度、温差、控制平滑度、能耗）

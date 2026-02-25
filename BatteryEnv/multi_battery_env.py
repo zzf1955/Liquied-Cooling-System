@@ -1,6 +1,6 @@
 import numpy as np
 from gymnasium import spaces
-from BatteryEnv.multi_battery_module import MutiBattery as MB
+from BatteryEnv.multi_battery_module import MultiBattery as MB
 from tianshou.env import SubprocVectorEnv, DummyVectorEnv
 import gymnasium as gym
 import os
@@ -18,7 +18,7 @@ class MutiBatteryEnv(gym.Env):
                 current_mu=20,          # 电流均值
                 current_sigma=2.5,      # 电流标准差
                 current_clip_range=(15, 35),  # 电流截断范围
-                flow_rate_range = (0,6),
+                flow_rate_range = (0, 3),
                 inlet_temp_range = (288, 295),  # 15-22°C
                 log_step = 1,
                 log_path = "",
@@ -47,6 +47,7 @@ class MutiBatteryEnv(gym.Env):
         self.flow_rate_range = flow_rate_range  # 流速范围 (m/s)
         self.max_battery_tmp = max_battery_tmp
         self.min_battery_tmp = min_battery_tmp
+        self.current_clip_range = current_clip_range  # 电流截断范围
 
         if not con:
             self.num_flow_actions = int(self.flow_rate_range[1] - self.flow_rate_range[0]) + 1
@@ -55,9 +56,11 @@ class MutiBatteryEnv(gym.Env):
             self.action_space = spaces.Box(low=-np.inf, high=np.inf, shape=(total_actions,), dtype=np.float32)
         else:
             self.action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+
+        # 状态空间：每组8个值（当前核心/顶部/底部温度、电流、电压 + 历史核心/顶部/底部温度）
         self.observation_space = spaces.Box(
-            low=np.array([0]*num_groups*3 + [current_clip_range[0]]*num_groups + [total_voltage_low]*num_groups, dtype=np.float32),
-            high=np.array([500]*num_groups*3 + [current_clip_range[1]]*num_groups + [total_voltage_high]*num_groups, dtype=np.float32),
+            low=np.array([0]*num_groups*6 + [current_clip_range[0]]*num_groups + [total_voltage_low]*num_groups, dtype=np.float32),
+            high=np.array([500]*num_groups*6 + [current_clip_range[1]]*num_groups + [total_voltage_high]*num_groups, dtype=np.float32),
             dtype=np.float32
         )
         self.con = con
@@ -79,6 +82,7 @@ class MutiBatteryEnv(gym.Env):
         self.intel_temp_action_log = []
         self.core_temp_log = []
         self.current_log = []
+        self.last_state = None  # 用于存储上一时刻的状态（温度趋势）
 
         self.episode_cnt = 0
         self.log_step = log_step
@@ -132,17 +136,21 @@ class MutiBatteryEnv(gym.Env):
         current_log_ = []
         for group_index in range(self.num_groups):
             if self.np_random.random()<=self.current_change_prob:
-                if self.battery_system.get_group_current(group_idx=group_index) == 0:
+                if self.battery_system.get_group_stats(group_idx=group_index)['current'] == 0:
                     self.battery_system.set_group_current(group_idx=group_index,current=self.current_mu)
                 else:
                     self.battery_system.set_group_current(group_idx=group_index,current=0)
-            current_log_.append(self.battery_system.get_group_current(group_idx=group_index))
+            current_log_.append(self.battery_system.get_group_stats(group_idx=group_index)['current'])
         self.current_log.append(current_log_)
+
+        # 保存当前状态作为历史状态（在运行电池系统之前）
+        current_state = self._get_state()
 
         # 运行电池系统
         self.battery_system.run(t_seconds=5)
 
-        # 获取状态
+        # 保存当前状态为历史状态，然后获取新状态
+        self.last_state = current_state.copy()
         state = self._get_state()
 
         # 计算奖励
@@ -154,8 +162,8 @@ class MutiBatteryEnv(gym.Env):
         # 判断终止条件：任意电池组的平均核心温度超过阈值
         done = False
         for i in range(self.num_groups):
-            group_core_temp = state[i * 5]  # 每组的平均核心温度
-            
+            group_core_temp = state[i * 8]  # 每组的平均核心温度
+
             # 温度终止条件
             if group_core_temp > self.max_battery_tmp or group_core_temp < self.min_battery_tmp:
                 done = True
@@ -167,15 +175,15 @@ class MutiBatteryEnv(gym.Env):
         # 添加调试信息
         info = {
             'reward': reward,
-            'group_temps': [state[i * 5] for i in range(self.num_groups)],
-            'group_voltages': [state[i * 5 + 4] for i in range(self.num_groups)],
+            'group_temps': [state[i * 8] for i in range(self.num_groups)],
+            'group_voltages': [state[i * 8 + 4] for i in range(self.num_groups)],
             'actions': action
         }
         self.allrew.append(reward)
         return state, reward, done, truncated, info
 
     def _get_state(self):
-        """获取环境的当前状态"""
+        """获取环境的当前状态（包含温度趋势）"""
         state = []
         global_current = self.battery_system.batteries[0].current  # 所有电池电流相同
 
@@ -184,42 +192,87 @@ class MutiBatteryEnv(gym.Env):
             start_idx = group_idx * self.num_batteries_per_group
             end_idx = start_idx + self.num_batteries_per_group
             group_batteries = self.battery_system.batteries[start_idx:end_idx]
-            
+
             # 计算组内平均值
             avg_core_temp = sum(b.get_core_temperature() for b in group_batteries) / len(group_batteries)
             avg_top_temp = sum(b.get_top_surface_average_temperature() for b in group_batteries) / len(group_batteries)
             avg_bottom_temp = sum(b.get_bottom_surface_average_temperature() for b in group_batteries) / len(group_batteries)
             total_voltage = sum(b.get_voltage() for b in group_batteries)
-            
+
+            # 当前状态
             state.extend([avg_core_temp, avg_top_temp, avg_bottom_temp, global_current, total_voltage])
-        
+
+            # 历史状态（上一时刻的温度）
+            if self.last_state is not None:
+                # 提取上一时刻对应组的温度
+                last_core_temp = self.last_state[group_idx * 8]
+                last_top_temp = self.last_state[group_idx * 8 + 1]
+                last_bottom_temp = self.last_state[group_idx * 8 + 2]
+            else:
+                # 初始时刻，使用当前温度作为历史
+                last_core_temp = avg_core_temp
+                last_top_temp = avg_top_temp
+                last_bottom_temp = avg_bottom_temp
+
+            state.extend([last_core_temp, last_top_temp, last_bottom_temp])
+
         return np.array(state, dtype=np.float32)
 
     def _calculate_reward(self, state, action, last_action):
-        """计算奖励函数"""
-        rewards = []
+        """计算奖励函数
 
-        flow_rate,inlet_temp = action[0],action[1]
+        奖励包含：
+        1. 温度超限惩罚：核心温度超过目标温度时惩罚
+        2. 组间温差惩罚：不同电池组之间的温差惩罚
+        3. 控制平滑度惩罚：动作变化的惩罚
+        4. 能耗惩罚：流速越高，能耗越大
+        """
+        target_temp = 298  # K (25°C) - 目标核心温度
 
-        # 计算每个组的奖励
+        flow_rate, inlet_temp = action[0], action[1]
+
+        # 1. 温度超限惩罚
+        temp_penalty = 0
         core_temps = []
         for i in range(self.num_groups):
-            # 核心温度差异
-            core_temp = state[i * 5]  # 当前组的平均核心温度
+            core_temp = state[i * 8]  # 当前组的平均核心温度
             core_temps.append(core_temp)
 
-            delta_temp = abs(core_temp - self.environment_temp)
-            
-            group_reward = max(-np.exp(delta_temp) + 3 , -2)
-            rewards.append(group_reward)
+            if core_temp > target_temp:
+                temp_penalty += (core_temp - target_temp) * 0.1  # 超温惩罚
+
+        # 2. 组间温差惩罚（系统温差惩罚）
+        if len(core_temps) > 1:
+            temp_spread = max(core_temps) - min(core_temps)
+            delta_penalty = temp_spread * 0.5
+        else:
+            delta_penalty = 0
+
+        # 3. 控制平滑度惩罚（基于实际动作变化）
+        # last_action 是电池的 get_action() 返回值 [inlet_temp, flow_rate]
+        if last_action is not None and len(last_action) >= 2:
+            last_flow_rate = last_action[1] if last_action[1] is not None else flow_rate
+            last_inlet_temp = last_action[0] if last_action[0] is not None else inlet_temp
+        else:
+            last_flow_rate = flow_rate
+            last_inlet_temp = inlet_temp
+
+        smooth_penalty = (
+            abs(flow_rate - last_flow_rate) * 0.1 +
+            abs(inlet_temp - last_inlet_temp) * 0.05
+        )
+
+        # 4. 能耗惩罚（流速越高，能耗越大）
+        energy_penalty = flow_rate * 0.05
+
+        # 基础奖励：温度越接近目标越好
+        base_reward = 1.0 - abs(core_temps[0] - target_temp) / 10.0
+        base_reward = max(base_reward, -1.0)
+
+        # 总奖励
+        reward = base_reward - temp_penalty - delta_penalty - smooth_penalty - energy_penalty
 
         self.core_temp_log.append(core_temps)
-        
-        d_temp_penalty = abs(inlet_temp - last_action[0])/(self.inlet_temp_range[1]-self.inlet_temp_range[0])
-        d_flow_penalty = (flow_rate)/(self.flow_rate_range[1]-self.flow_rate_range[0])
-
-        # 平均奖励
-        reward = np.mean(rewards) - d_temp_penalty - d_flow_penalty
         return reward
 
     def reset(self, seed=233, randomize_init_current=False):
@@ -265,6 +318,7 @@ class MutiBatteryEnv(gym.Env):
         self.intel_temp_action_log = []
         self.core_temp_log = []
         self.current_log = []
+        self.last_state = None  # 重置历史状态
 
         super().reset(seed=seed)
 
@@ -305,7 +359,7 @@ class MutiBatteryEnv(gym.Env):
             avg_core_temp = sum(b.get_core_temperature() for b in group_batteries) / len(group_batteries)
             avg_top_temp = sum(b.get_top_surface_average_temperature() for b in group_batteries) / len(group_batteries)
             avg_bottom_temp = sum(b.get_bottom_surface_average_temperature() for b in group_batteries) / len(group_batteries)
-            current = self.battery_system.get_group_current(group_idx)
+            current = self.battery_system.get_group_stats(group_idx)['current']
             total_voltage = sum(b.get_voltage() for b in group_batteries)
             
             # 获取第一个电池的冷却参数作为组的代表
