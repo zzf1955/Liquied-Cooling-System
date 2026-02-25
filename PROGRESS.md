@@ -548,3 +548,59 @@ self.battery_system.batteries[0].inlet_temp = inlet_temp
 ### 经验总结
 1. **并行环境随机数**：在 SubprocVectorEnv 等并行环境中，应使用 `self.np_random` 而非全局 `np.random`
 2. **Gymnasium 规范**：遵循 Gymnasium 的随机数管理最佳实践
+
+---
+
+## 2025-02-25: 多电池模块物理仿真修复与测试
+
+### 问题描述
+1. 旧版本和多版本冷却液传递逻辑不清楚
+2. 标准参数下组间温差太小(<1K)
+3. 冷却液温升不明显
+4. 不确定参数范围是否能满足RL训练要求
+
+### 解决方案
+
+#### 1. 物理参数调整 (single_battery_module.py)
+- `diffuse_cooling` 的 `diffusion_factor`: 0.02 → 0.005 (减小扩散，增加垂直温差)
+- `apply_cooling` 的 `cooling_boost`: 0 → 10 (增强冷却效果)
+
+#### 2. 代码整理
+- 修复 `multi_battery_module.py` 代码格式(PEP8)
+- 添加 `get_group_average_temperatures` 方法(与旧版本兼容)
+- 修复热传导逻辑的边界处理
+
+#### 3. 测试验证
+创建了全面的测试场景验证物理行为：
+- 无冷却：温度上升至36.5°C
+- 冷却不足(v=0.15)：温度25.8-29.1°C，温差3.30K ✓
+- 适度冷却(v=0.25)：温度26.2-28.1°C，温差1.96K
+- 冷却过度(v=0.4)：温度24.9-26.3°C
+- 高入口温度(22°C)：温度31.9-33.3°C
+- 电流突变(30A→50A)：温度上升12K
+
+### RL环境参数建议
+| 参数 | 推荐范围 |
+|------|---------|
+| 流速 | 0.15 - 0.25 m/s |
+| 入口温度 | 15 - 18°C (288-291K) |
+| 电流 | 30A (固定) |
+
+### 测试文件整理
+保留关键测试文件：
+- `test/comprehensive_test_v2.py` - 综合测试和可视化
+- `test/analyze_temperature_detail.py` - 电池温度详细分析
+
+删除调试文件：
+- debug_*.py 系列
+- param_sweep.py
+- verify_*.py
+
+### git commit
+- 分支：`fix/physical-compute`
+- 待合并到 `fix/cooling-physics`
+
+### 经验总结
+1. **温差来源**：低流速时冷却液温升更大，组间温差更明显
+2. **参数敏感性**：cooling_boost过大会导致数值不稳定(50时出现60000+K温升)
+3. **物理真实性**：液冷入口温度应在15-22°C范围，符合实际工况
