@@ -9,7 +9,7 @@ from tianshou.utils.net.continuous import ActorProb, Critic
 from tianshou.policy import SACPolicy
 from diffusion import Diffusion
 from diffusion.model import MLP
-from BatteryEnv.muti_battery_env import make_env # 确保这个导入路径正确
+from BatteryEnv.multi_battery_env import make_env # 确保这个导入路径正确
 
 # --- 从训练脚本复制的参数 ---
 # 环境参数

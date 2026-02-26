@@ -22,7 +22,7 @@ battery
 │    ├─ muti_battery_module.py
 │    ├─ single_battery_env.py
 │    └─ single_battery_module.py
-├─ diffusion **diffusio模块，继承自AGOD**
+├─ diffusion **diffusion模块，继承自AGOD**
 │    ├─ __init__.py
 │    ├─ diffusion.py
 │    ├─ helpers.py

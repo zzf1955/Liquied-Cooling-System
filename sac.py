@@ -12,7 +12,7 @@ from tianshou.utils.net.continuous import ActorProb, Critic
 from tianshou.policy import SACPolicy
 from tianshou.trainer import offpolicy_trainer
 from datetime import datetime
-from BatteryEnv.muti_battery_env import make_env
+from BatteryEnv.multi_battery_env import make_env
 
 module_name = "sac_policy.pth"
 
