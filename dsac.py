@@ -62,7 +62,8 @@ env, train_envs, test_envs = make_env(
     num_groups=num_groups, 
     episode_steps=episode_steps,
     log_path = log_path,
-con = True)
+    con = True
+)
 
 # Define actor and critic models separately
 def create_actor(state_shape, action_shape):
@@ -188,4 +189,4 @@ def main():
     print(result)
 
 if __name__ == '__main__':
-        main()
+    main()

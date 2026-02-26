@@ -13,9 +13,9 @@ from tianshou.env import SubprocVectorEnv, DummyVectorEnv
 import os
 import pandas as pd
 from loguru import logger
+from BatteryEnv.multi_battery_module import MultiBattery as MB
 
-
-class MutiBatteryEnv(gym.Env):
+class MultiBatteryEnv(gym.Env):
     """
     多电池储能系统液冷热管理环境
 
@@ -88,10 +88,10 @@ class MutiBatteryEnv(gym.Env):
             env_index: 环境索引（多进程用）
             debug: 是否开启调试输出
         """
-        super(MutiBatteryEnv, self).__init__()
+        super(MultiBatteryEnv, self).__init__()
 
         # 导入物理模型
-        from BatteryEnv.multi_battery_module import MultiBattery as MB
+        
 
         # 物理系统
         self.battery_system = MB(
@@ -618,7 +618,7 @@ def make_env(
 
     def _select_env(evaluate: bool = False, env_idx: int = 0, seed: int = None):
         """创建独立的环境实例"""
-        env = MutiBatteryEnv(
+        env = MultiBatteryEnv(
             num_batteries_per_group=num_batteries_per_group,
             num_groups=num_groups,
             max_steps=episode_steps,
