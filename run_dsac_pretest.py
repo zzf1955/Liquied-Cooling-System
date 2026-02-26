@@ -45,16 +45,16 @@ seed = 42
 # 训练参数
 alpha = 0.05
 tau = 0.005
-buffer_size = 100000
-epoch = 500          # 减少用于快速验证
-step_per_epoch = 200
-episode_per_collect = 1
-episode_per_test = 1
-repeat_per_collect = 1
-update_per_step = 1
-batch_size = 256     # 减小batch
-gamma = 0.95
-n_step = 3
+buffer_size = 100000  # 经验回放池容量
+epoch = 500          # 总训练轮数，减少用于快速验证
+step_per_epoch = 200  # 每个 epoch 包含的训练步数
+episode_per_collect = 1  # 采集阶段需要完成的回合数
+episode_per_test = 1  # 评估阶段运行的回合数
+repeat_per_collect = 1  # 采集完数据后，重复进行更新的次数
+update_per_step = 1  # 训练强度系数
+batch_size = 256     # 从 buffer 中抽取的样本量
+gamma = 0.95  # 折扣因子
+n_step = 3   # 多步奖励计算
 training_num = 4      # 4个并行环境
 test_num = 1
 

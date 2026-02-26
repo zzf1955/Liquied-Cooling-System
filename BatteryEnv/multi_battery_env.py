@@ -90,9 +90,6 @@ class MultiBatteryEnv(gym.Env):
         """
         super(MultiBatteryEnv, self).__init__()
 
-        # 导入物理模型
-        
-
         # 物理系统
         self.battery_system = MB(
             num_batteries_per_group=num_batteries_per_group,
